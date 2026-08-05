@@ -154,6 +154,9 @@ void LoadUIImageAsset(CAssetContainer* const pak, CAsset* const asset)
             {
                 // We need to grab the whole buffer due to compression else we explode. Also it can't be in opt!!!!
                 std::unique_ptr<char[]> tableData = asset->getStarPakData(uiAsset->streamedOffset, uiAsset->streamedSize, false);
+                if (!tableData)
+                    return nullptr;
+
                 if (uiAsset->compType > eCompressionType::NONE)
                 {
                     uint64_t bufSize = uiAsset->streamedSize;
@@ -161,6 +164,9 @@ void LoadUIImageAsset(CAssetContainer* const pak, CAsset* const asset)
                 }
 
                 assertm(tableData, "Failed to get starpak data?");
+                if (!tableData)
+                    return nullptr;
+
                 memcpy_s(tilePoints.get(), tileTableSize, tableData.get(), tileTableSize);
             }
             else
@@ -279,12 +285,17 @@ std::unique_ptr<CTexture> CreateBC1TextureForUIImageAsset(CPakAsset* const asset
     {
         streamedData = asset->getStarPakData(uiAsset->streamedOffset, uiAsset->streamedSize, false);
         assertm(streamedData, "invalid table data even though streamed.");
+        if (!streamedData)
+            return nullptr;
+
         if (uiAsset->compType > eCompressionType::NONE)
         {
             uint64_t bufSize = uiAsset->streamedSize;
             streamedData = RTech::DecompressStreamedBuffer(std::move(streamedData), bufSize, uiAsset->compType);
         }
         assertm(streamedData, "invalid table data after decode.");
+        if (!streamedData)
+            return nullptr;
 
         bc1Data = streamedData.get();
     }
@@ -348,12 +359,17 @@ std::unique_ptr<CTexture> CreateBC7TextureForUIImageAsset(CPakAsset* const asset
     {
         streamedData = asset->getStarPakData(uiAsset->streamedOffset, uiAsset->streamedSize, false);
         assertm(streamedData, "invalid table data even though streamed.");
+        if (!streamedData)
+            return nullptr;
+
         if (uiAsset->compType > eCompressionType::NONE)
         {
             uint64_t bufSize = uiAsset->streamedSize;
             streamedData = RTech::DecompressStreamedBuffer(std::move(streamedData), bufSize, uiAsset->compType);
         }
         assertm(streamedData, "invalid table data after decode.");
+        if (!streamedData)
+            return nullptr;
 
         bc7Data = streamedData.get();
     }
