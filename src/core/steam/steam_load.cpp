@@ -46,13 +46,22 @@ bool SteamDownloadRpaksForLoad(
 			toDownload.insert(file.depotPath);
 	}
 
-	// For each requested base pak, also pull the highest patch variant in the manifest.
+	// For each requested pak, pull the full patch chain from the manifest:
+	// base + (01) + (02) + ... — LoadAndPatchPakFileData needs every layer,
+	// not just the top patch that patch_master points at.
+	auto matchesPakStem = [](const std::string& fileStem, const std::string& stem) -> bool
+		{
+			if (fileStem == stem)
+				return true;
+			if (fileStem.size() > stem.size() + 3 && fileStem.compare(0, stem.size(), stem) == 0
+				&& fileStem[stem.size()] == '(' && fileStem.back() == ')')
+				return true;
+			return false;
+		};
+
 	for (const std::string& requested : depotRpakPaths)
 	{
-		const std::string norm = CSteamClient::NormalizeDepotPath(requested);
-		const std::string stem = PakStemNoPatch(norm);
-		std::string best;
-		int bestPatch = -1;
+		const std::string stem = PakStemNoPatch(CSteamClient::NormalizeDepotPath(requested));
 
 		for (const auto& file : allFiles)
 		{
@@ -60,33 +69,9 @@ bool SteamDownloadRpaksForLoad(
 			if (fp.extension() != ".rpak")
 				continue;
 
-			const std::string fileStem = fp.stem().string();
-			if (fileStem == stem)
-			{
-				if (bestPatch < 0)
-				{
-					best = file.depotPath;
-					bestPatch = 0;
-				}
-				continue;
-			}
-
-			// Match stem(NN)
-			if (fileStem.size() > stem.size() + 3 && fileStem.compare(0, stem.size(), stem) == 0
-				&& fileStem[stem.size()] == '(' && fileStem.back() == ')')
-			{
-				const std::string num = fileStem.substr(stem.size() + 1, fileStem.size() - stem.size() - 2);
-				const int patch = atoi(num.c_str());
-				if (patch > bestPatch)
-				{
-					bestPatch = patch;
-					best = file.depotPath;
-				}
-			}
+			if (matchesPakStem(fp.stem().string(), stem))
+				toDownload.insert(file.depotPath);
 		}
-
-		if (!best.empty())
-			toDownload.insert(best);
 	}
 
 	auto isPlausibleRpak = [](const std::filesystem::path& path) -> bool
@@ -130,26 +115,46 @@ bool SteamDownloadRpaksForLoad(
 			}
 		}
 
-		// Only return user-selected (or their resolved patch) paths to the loader,
-		// not patch_master alone.
-		bool isSelected = false;
-		for (const std::string& requested : depotRpakPaths)
+		if (progressCounter)
+			++(*progressCounter);
+	}
+
+	// Hand the loader one path per selected stem. Prefer the base name so
+	// HandlePakLoad + patch_master can remap to the top patch; chain siblings
+	// stay on disk beside it for LoadAndPatchPakFileData.
+	std::unordered_set<std::string> emittedStems;
+	for (const std::string& requested : depotRpakPaths)
+	{
+		const std::string reqNorm = CSteamClient::NormalizeDepotPath(requested);
+		const std::string stem = PakStemNoPatch(reqNorm);
+		if (!emittedStems.insert(stem).second)
+			continue;
+
+		std::filesystem::path preferred;
+		std::filesystem::path anyMatch;
+		for (const std::string& depotPath : toDownload)
 		{
-			const std::string reqNorm = CSteamClient::NormalizeDepotPath(requested);
-			const std::string reqStem = PakStemNoPatch(reqNorm);
+			if (depotPath.ends_with("patch_master.rpak"))
+				continue;
+
 			const std::string gotStem = PakStemNoPatch(depotPath);
-			if (reqStem == gotStem)
+			if (gotStem != stem)
+				continue;
+
+			const std::filesystem::path candidate = std::filesystem::absolute(root / std::filesystem::path(depotPath));
+			anyMatch = candidate;
+
+			const std::string fileStem = std::filesystem::path(depotPath).stem().string();
+			if (fileStem == stem)
 			{
-				isSelected = true;
+				preferred = candidate;
 				break;
 			}
 		}
 
-		if (isSelected)
-			outLocalPaths.emplace_back(std::filesystem::absolute(dest).string());
-
-		if (progressCounter)
-			++(*progressCounter);
+		const std::filesystem::path& chosen = preferred.empty() ? anyMatch : preferred;
+		if (!chosen.empty())
+			outLocalPaths.emplace_back(chosen.string());
 	}
 
 	if (outLocalPaths.empty())

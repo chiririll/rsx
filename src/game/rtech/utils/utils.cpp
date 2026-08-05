@@ -2251,6 +2251,9 @@ bool RTech::DecompressSnowflake(int64_t param_buffer, uint64_t data_size, uint64
 
 std::unique_ptr<char[]> RTech::DecompressStreamedBuffer(std::unique_ptr<char[]> buf, uint64_t& bufSize, const eCompressionType compType)
 {
+    if (!buf || bufSize == 0)
+        return nullptr;
+
     switch (compType)
     {
     case eCompressionType::OODLE:
