@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <condition_variable>
 #include <shared_mutex>
 
@@ -30,6 +31,8 @@ class CSteamClient
 {
 public:
 	using GuardCodeCallback = std::function<std::string(const std::string& prompt)>;
+	// Called on the CM callback thread whenever Steam issues a (new) QR login URL.
+	using QrUrlCallback = std::function<void(const std::string& url)>;
 
 	CSteamClient();
 	~CSteamClient();
@@ -46,6 +49,12 @@ public:
 	// Full login. If a remembered token exists and rememberLogin is true, tries token first.
 	bool Login(const std::string& username, const std::string& password, bool rememberLogin,
 		const GuardCodeCallback& guardCb, std::string& outError);
+
+	// QR login via Steam mobile app. onUrl receives the URL to encode as a QR code
+	// (may be called multiple times if Steam refreshes it). cancelFlag may be set
+	// from another thread to abort waiting.
+	bool LoginWithQr(bool rememberLogin, const QrUrlCallback& onUrl,
+		std::atomic<bool>* cancelFlag, std::string& outError);
 
 	bool LoginAnonymous(std::string& outError);
 	bool LoginWithToken(const std::string& token, std::string& outError);

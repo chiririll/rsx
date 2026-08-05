@@ -397,6 +397,97 @@ bool CSteamClient::Login(const std::string& username, const std::string& passwor
 	return true;
 }
 
+bool CSteamClient::LoginWithQr(bool rememberLogin, const QrUrlCallback& onUrl,
+	std::atomic<bool>* cancelFlag, std::string& outError)
+{
+	if (rememberLogin)
+	{
+		std::string savedUser;
+		std::string savedToken;
+		if (LoadToken(savedUser, savedToken))
+		{
+			if (LoginWithToken(savedToken, outError))
+			{
+				m_username = savedUser;
+				return true;
+			}
+			ClearToken();
+			outError.clear();
+		}
+	}
+
+	if (!EnsureConnected(outError))
+		return false;
+
+	std::string authToken;
+	bool authCompleted = false;
+	bool sawUrl = false;
+
+	m_impl->waiter.Reset();
+	m_impl->waiter.onData = [&](void* data)
+		{
+			const auto* polling = static_cast<const tek_sc_cm_data_auth_polling*>(data);
+			if (polling->status == TEK_SC_CM_AUTH_STATUS_new_url)
+			{
+				if (polling->url && onUrl)
+					onUrl(polling->url);
+				sawUrl = true;
+			}
+			else if (polling->status == TEK_SC_CM_AUTH_STATUS_awaiting_confirmation)
+			{
+				// QR login usually waits for a confirmation tap in the Steam app.
+				// Keep polling; no code entry required for the device confirmation path.
+				if (onUrl && (polling->confirmation_types & TEK_SC_CM_AUTH_CONFIRMATION_TYPE_device))
+					onUrl({}); // empty URL = "confirm in app" signal to UI
+			}
+			else if (polling->status == TEK_SC_CM_AUTH_STATUS_completed)
+			{
+				m_impl->waiter.result = polling->result;
+				if (tek_sc_err_success(&polling->result) && polling->token)
+					authToken = polling->token;
+				authCompleted = true;
+			}
+		};
+
+	tek_sc_cm_auth_qr(m_impl->cm, kDeviceName, &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
+
+	for (;;)
+	{
+		if (cancelFlag && cancelFlag->load())
+		{
+			outError = "QR login cancelled";
+			return false;
+		}
+
+		if (!m_impl->waiter.Wait(180000, outError))
+			return false;
+
+		if (authCompleted)
+			break;
+
+		// Intermediate event (new QR URL or awaiting mobile confirmation) — keep waiting.
+		m_impl->waiter.Reset();
+	}
+
+	if (!tek_sc_err_success(&m_impl->waiter.result) || authToken.empty())
+	{
+		outError = FormatTekError(m_impl->waiter.result);
+		if (outError.empty())
+			outError = sawUrl ? "QR login failed or timed out" : "Steam did not issue a QR login URL";
+		return false;
+	}
+
+	if (!LoginWithToken(authToken, outError))
+		return false;
+
+	const tek_sc_cm_auth_token_info info = tek_sc_cm_parse_auth_token(authToken.c_str());
+	m_username = info.steam_id != 0 ? std::to_string(info.steam_id) : "qr_login";
+	if (rememberLogin)
+		SaveToken(m_username, authToken);
+
+	return true;
+}
+
 void CSteamClient::Logout()
 {
 	m_signedIn = false;
