@@ -3,6 +3,7 @@
 
 #pragma once
 #include <game/rtech/utils/utils.h>
+#include <game/rtech/starpak_source.h>
 #include <game/asset.h>
 
 // maximum number of asset types that can be registered at a time
@@ -606,7 +607,10 @@ union AssetPtr_t
 struct StarPak_t
 {
     std::unordered_map<uint64_t, size_t> parsedOffsets;
+    // Kept for display (getStarPakName) and local path identity. For Steam
+    // sources this holds the depot-relative path.
     std::string filePath;
+    std::unique_ptr<CStarPakSource> source;
 };
 
 #if defined(PAKLOAD_PATCHING_ANY)
@@ -824,7 +828,9 @@ private:
 
     // Populates CPakFile members from file
     const bool ParseFromFile(const std::string& filePath, std::shared_ptr<char[]>& buf);
-    const bool ParseStreamedFile(const std::string& fileName, bool opt);
+    // depotPath is the path as stored in the rpak (may include directories);
+    // fileName is typically just the basename used for local sibling lookup.
+    const bool ParseStreamedFile(const std::string& fileName, const std::string& depotPath, bool opt);
 
 #if defined(PAKLOAD_PATCHING_ANY)
     void ParsePatchEditStream();
@@ -1238,22 +1244,13 @@ public:
     std::unique_ptr<char[]> getStarPakData(const uint64_t offset, const uint64_t size, const bool opt) const
     {
         const StarPak_t* const pakEntry = getStarPak(opt);
-        if (!pakEntry)
+        if (!pakEntry || !pakEntry->source)
             return nullptr;
 
         assertm(offset > 0, "starpak offset can't be zero.");
         assertm(size > 0, "starpak size can't be zero.");
 
-        StreamIO file;
-        if (!file.open(pakEntry->filePath, eStreamIOMode::Read))
-            return nullptr;
-
-        file.seek(offset);
-
-        std::unique_ptr<char[]> data(new char[size]);
-        file.read(data.get(), size);
-
-        return data;
+        return pakEntry->source->readAt(offset, size);
     }
 
     const char* getStarPakName(const bool opt) const

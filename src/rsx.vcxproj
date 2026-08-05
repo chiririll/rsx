@@ -22,6 +22,13 @@
     <ClInclude Include="core\audio\audioplayer.h" />
     <ClInclude Include="core\bridge\bridge.h" />
     <ClInclude Include="core\cache\cachedb.h" />
+    <ClInclude Include="core\steam\steamcache.h" />
+    <ClInclude Include="core\steam\steamclient.h" />
+    <ClInclude Include="core\steam\steam_load.h" />
+    <ClInclude Include="core\steam\tek_includes.h" />
+    <ClInclude Include="core\render\ui\steam_window.h" />
+    <ClInclude Include="game\rtech\starpak_source.h" />
+    <ClInclude Include="game\rtech\steam_starpak_source.h" />
     <ClInclude Include="core\crashhandler.h" />
     <ClInclude Include="core\features.h" />
     <ClInclude Include="core\filehandling\validation.h" />
@@ -163,6 +170,12 @@
     <ClCompile Include="core\audio\audioplayer.cpp" />
     <ClCompile Include="core\bridge\bridge.cpp" />
     <ClCompile Include="core\cache\cachedb.cpp" />
+    <ClCompile Include="core\steam\steamcache.cpp" />
+    <ClCompile Include="core\steam\steamclient.cpp" />
+    <ClCompile Include="core\steam\steam_load.cpp" />
+    <ClCompile Include="core\render\ui\steam_window.cpp" />
+    <ClCompile Include="game\rtech\starpak_source.cpp" />
+    <ClCompile Include="game\rtech\steam_starpak_source.cpp" />
     <ClCompile Include="core\crashhandler.cpp" />
     <ClCompile Include="core\filehandling\bpk.cpp" />
     <ClCompile Include="core\filehandling\list.cpp" />
@@ -474,6 +487,9 @@
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)tools\prebuild.ps1" -projectDir $(ProjectDir)</Command>
     </PreBuildEvent>
+    <PostBuildEvent>
+      <Command>if not exist "$(OutDir)libtek-steamclient-2.dll" copy /Y "$(ProjectDir)thirdparty\tek-steamclient\libtek-steamclient-2.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
     <ClCompile>
@@ -507,6 +523,9 @@
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)tools\prebuild.ps1" -projectDir $(ProjectDir)</Command>
     </PreBuildEvent>
+    <PostBuildEvent>
+      <Command>if not exist "$(OutDir)libtek-steamclient-2.dll" copy /Y "$(ProjectDir)thirdparty\tek-steamclient\libtek-steamclient-2.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_CI|x64'">
     <ClCompile>
@@ -540,6 +559,9 @@
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)tools\prebuild.ps1" -projectDir $(ProjectDir)</Command>
     </PreBuildEvent>
+    <PostBuildEvent>
+      <Command>if not exist "$(OutDir)libtek-steamclient-2.dll" copy /Y "$(ProjectDir)thirdparty\tek-steamclient\libtek-steamclient-2.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Release_NoGui|x64'">
     <ClCompile>
@@ -573,6 +595,9 @@
     <PreBuildEvent>
       <Command>powershell -ExecutionPolicy Bypass -File "$(SolutionDir)tools\prebuild.ps1" -projectDir $(ProjectDir)</Command>
     </PreBuildEvent>
+    <PostBuildEvent>
+      <Command>if not exist "$(OutDir)libtek-steamclient-2.dll" copy /Y "$(ProjectDir)thirdparty\tek-steamclient\libtek-steamclient-2.dll" "$(OutDir)"</Command>
+    </PostBuildEvent>
   </ItemDefinitionGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

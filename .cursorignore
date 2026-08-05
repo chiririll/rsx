@@ -358,10 +358,6 @@ MigrationBackup/
 radaudio_decoder_win64.lib
 imgui.ini
 rsx_cache_db.bin
-rsx_steam_token.bin
-rsx_steam_cache/
-src/thirdparty/tek-steamclient/libtek-steamclient-2.dll
-src/thirdparty/tek-steamclient/libtek-steamclient-2.exp
 
 # Misc
 *.json

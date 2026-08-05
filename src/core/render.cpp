@@ -24,6 +24,7 @@
 #include <core/fonts/codicons.h>
 
 #include <core/utils/gamefinder.h>
+#include <core/render/ui/steam_window.h>
 #include <misc/ImGuiNotify.hpp>
 
 extern CDXParentHandler* g_dxHandler;
@@ -345,7 +346,7 @@ void SettingsWnd_Draw(CUIState* uiState)
 
         ImGui::Combo("Compression Level", reinterpret_cast<int*>(&UtilsConfig->compressionLevel), s_CompressionLevelSetting, static_cast<int>(ARRAYSIZE(s_CompressionLevelSetting)));
         ImGui::SameLine();
-        ImGuiExt::HelpMarker("Specifies the compression level used when storing parsed assets in memory.\nWARNING: Modify only if you know what you’re doing; otherwise, you may run out of memory.\nNone: no compression.\nSuper Fast: Fastest level with the lowest compression ratio.\nVery Fast: Standard setting; fastest level with a decent compression ratio.\nFast: Fastest level with a good compression ratio.\nNormal: Standard LZ speed with the highest compression ratio.");
+        ImGuiExt::HelpMarker("Specifies the compression level used when storing parsed assets in memory.\nWARNING: Modify only if you know what you?re doing; otherwise, you may run out of memory.\nNone: no compression.\nSuper Fast: Fastest level with the lowest compression ratio.\nVery Fast: Standard setting; fastest level with a decent compression ratio.\nFast: Fastest level with a good compression ratio.\nNormal: Standard LZ speed with the highest compression ratio.");
 
         ImGui::SliderScalar("Parse Threads", ImGuiDataType_U32, &UtilsConfig->parseThreadCount, &minThreads, reinterpret_cast<int*>(&g_maxConcurrentThreadCount));
         ImGui::SameLine();
@@ -489,6 +490,9 @@ static void MainWnd_MenuBar()
         {
             if (ImGui::MenuItem("Open", "CTRL+O", false, !inJobAction))
                 ShowOpenFileDialog();
+
+            if (ImGui::MenuItem("Load from Steam...", nullptr, false, !inJobAction))
+                OpenSteamLoadWindow();
             LOADING_TOOLTIP();
 
             if (ImGui::MenuItem("Unload Files", "CTRL+W", false, !inJobAction))
@@ -617,6 +621,10 @@ static void MainWnd_WelcomeBox()
 
             if (ImGui::Button("Open File..."))
                 ShowOpenFileDialog();
+
+            ImGui::SameLine();
+            if (ImGui::Button("Load from Steam..."))
+                OpenSteamLoadWindow();
 
             if (gfResults.gameDescriptors.size() > 0)
             {
@@ -1178,6 +1186,8 @@ void HandleRenderFrame()
 
     if (uiState.logWindowVisible)
         LogWnd_Draw(&uiState);
+
+    RenderSteamLoadWindow();
 
     g_pImGuiHandler->HandleProgressBar();
 

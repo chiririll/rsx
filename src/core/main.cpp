@@ -10,6 +10,7 @@
 #include <core/render/dx.h>
 #include <core/input/input.h>
 #include <core/cache/cachedb.h>
+#include <core/steam/steamcache.h>
 #include <core/utils/cli_parser.h>
 #include <core/utils/exportsettings.h>
 #include <core/filehandling/load.h>
@@ -277,6 +278,7 @@ int main(int argc, char* argv[])
     g_maxConcurrentThreadCount = CThread::GetConCurrentThreads();
 
     g_cacheDBManager.LoadFromFile((std::filesystem::current_path() / "rsx_cache_db.bin").string());
+    g_steamCacheManager.SetCacheDirectory(std::filesystem::current_path() / "rsx_steam_cache");
 
     RegisterAssetTypeBindings(&cli);
 

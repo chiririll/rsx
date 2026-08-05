@@ -4,8 +4,11 @@
 #include <pch.h>
 #include <game/rtech/cpakfile.h>
 #include <game/rtech/patchapi.h>
+#include <game/rtech/steam_starpak_source.h>
 
 #include <game/rtech/utils/utils.h>
+#include <core/steam/steamclient.h>
+#include <core/steam/steamcache.h>
 
 #ifndef RTECH_STATIC_LIB
 #include <thirdparty/imgui/misc/imgui_utility.h>
@@ -190,7 +193,7 @@ const bool CPakFile::LoadNonPatched()
             const std::string streamingFilePath = reinterpret_cast<char*>(buf + offset);
             std::filesystem::path fileInfo(streamingFilePath);
 
-            ParseStreamedFile(fileInfo.filename().string(), false);
+            ParseStreamedFile(fileInfo.filename().string(), streamingFilePath, false);
             const int length = static_cast<int>(streamingFilePath.length());
 
             // add to offset so we can get the next path on the next iteration
@@ -210,7 +213,7 @@ const bool CPakFile::LoadNonPatched()
             const std::string streamingFilePath = reinterpret_cast<char*>(buf + offset);
             const std::filesystem::path fileInfo(streamingFilePath);
 
-            ParseStreamedFile(fileInfo.filename().string(), true);
+            ParseStreamedFile(fileInfo.filename().string(), streamingFilePath, true);
             const int length = static_cast<int>(streamingFilePath.length());
 
             // add to offset so we can get the next path on the next iteration
@@ -478,7 +481,7 @@ const bool CPakFile::LoadAndPatchPakFileData()
             const std::string streamingFilePath = header()->GetStreamingFilePaths() + offset;
             std::filesystem::path fileInfo(streamingFilePath);
 
-            ParseStreamedFile(fileInfo.filename().string(), false);
+            ParseStreamedFile(fileInfo.filename().string(), streamingFilePath, false);
             const int length = static_cast<int>(streamingFilePath.length());
 
             // add to offset so we can get the next path on the next iteration
@@ -499,7 +502,7 @@ const bool CPakFile::LoadAndPatchPakFileData()
             std::string streamingFilePath = header()->GetOptStreamingFilePaths() + offset;
             std::filesystem::path fileInfo(streamingFilePath);
 
-            ParseStreamedFile(fileInfo.filename().string(), true);
+            ParseStreamedFile(fileInfo.filename().string(), streamingFilePath, true);
             const int length = static_cast<int>(streamingFilePath.length());
 
             // add to offset so we can get the next path on the next iteration
@@ -530,7 +533,7 @@ const bool CPakFile::ParseFromFile(const std::string& filePath, std::shared_ptr<
     return true;
 }
 
-const bool CPakFile::ParseStreamedFile(const std::string& fileName, bool opt)
+const bool CPakFile::ParseStreamedFile(const std::string& fileName, const std::string& depotPath, bool opt)
 {
     // The end of the starpak path buffers is padded with null bytes to get back to (8 byte?) alignment
     // This check isn't entirely necessary, as we will fail out of this function with a null path anyway, however
@@ -555,36 +558,99 @@ const bool CPakFile::ParseStreamedFile(const std::string& fileName, bool opt)
     };
     std::unique_ptr<StarPak_t> pakEntry = std::make_unique<StarPak_t>();
 
-    const std::string path = std::filesystem::path(GetFilePath()).parent_path().string().append("\\" + fileName);
-    pakEntry.get()->filePath = path;
+    const std::string localPath = std::filesystem::path(GetFilePath()).parent_path().string().append("\\" + fileName);
+    pakEntry->filePath = localPath;
 
-    StreamIO file;
-    if (!file.open(path, eStreamIOMode::Read))
+    auto parseToc = [&](CStarPakSource& source) -> bool
+        {
+            const uint64_t fileSize = source.size();
+            if (fileSize < sizeof(uint64_t))
+                return false;
+
+            const auto countBuf = source.readAt(fileSize - sizeof(uint64_t), sizeof(uint64_t));
+            if (!countBuf)
+                return false;
+
+            uint64_t entryCount = 0;
+            memcpy(&entryCount, countBuf.get(), sizeof(uint64_t));
+
+            const uint64_t tocBytes = sizeof(StarPakStreamEntry_t) * entryCount;
+            if (fileSize < sizeof(uint64_t) + tocBytes)
+                return false;
+
+            const auto tocBuf = source.readAt(fileSize - sizeof(uint64_t) - tocBytes, tocBytes);
+            if (!tocBuf && entryCount != 0)
+                return false;
+
+            for (uint64_t i = 0; i < entryCount; i++)
+            {
+                StarPakStreamEntry_t entry{};
+                memcpy(&entry, tocBuf.get() + (sizeof(StarPakStreamEntry_t) * i), sizeof(StarPakStreamEntry_t));
+
+                // [rika]: we should not being adding invalid starpak entries, these only really appear in pak V6 (possibly a bakery issue?)
+                if (entry.size == 0)
+                    continue;
+
+                pakEntry->parsedOffsets.emplace(entry.offset, entry.size);
+            }
+
+            return true;
+        };
+
+    // Prefer a local sibling file when present.
+    if (std::filesystem::exists(localPath))
     {
-        g_assetData.Log_Warning(this, "Failed to open StarPak file \"%s\". Assets may be missing data", fileName.c_str());
-        return false;
+        auto localSource = std::make_unique<CLocalStarPakSource>(localPath);
+        if (parseToc(*localSource))
+        {
+            pakEntry->source = std::move(localSource);
+            opt ? m_vOptStarPaks.emplace_back(std::move(pakEntry)) : m_vStarPaks.emplace_back(std::move(pakEntry));
+            return true;
+        }
     }
 
-    file.seek(file.size() - sizeof(uint64_t));
-
-    uint64_t entryCount = 0;
-    file.read(reinterpret_cast<char*>(&entryCount), sizeof(uint64_t));
-    file.seek(file.size() - sizeof(uint64_t) - (sizeof(StarPakStreamEntry_t) * entryCount));
-
-    for (uint64_t i = 0; i < entryCount; i++)
+    // Fall back to Steam CDN when a depot context is pinned.
+    if (g_steamClient.HasDepotContext())
     {
-        StarPakStreamEntry_t entry;
-        file.read(reinterpret_cast<char*>(&entry), sizeof(StarPakStreamEntry_t));
+        SteamDepotFile_t remoteFile{};
+        std::string steamError;
+        const std::string lookupPath = depotPath.empty() ? fileName : depotPath;
+        if (g_steamClient.FindManifestFile(lookupPath, remoteFile, steamError))
+        {
+            // Prefer cached TOC when available.
+            const auto& ctx = g_steamClient.GetDepotContext();
+            if (!g_steamCacheManager.TryGetStarPakToc(ctx.depotId, ctx.manifestId, remoteFile.depotPath, pakEntry->parsedOffsets))
+            {
+                auto steamSource = std::make_unique<CSteamStarPakSource>(remoteFile.depotPath, static_cast<uint64_t>(remoteFile.size));
+                if (!parseToc(*steamSource))
+                {
+                    g_assetData.Log_Warning(this, "Failed to read StarPak TOC from Steam for \"%s\": %s", fileName.c_str(), steamError.c_str());
+                    pakEntry->source = std::make_unique<CNullStarPakSource>();
+                    pakEntry->filePath = remoteFile.depotPath;
+                    opt ? m_vOptStarPaks.emplace_back(std::move(pakEntry)) : m_vStarPaks.emplace_back(std::move(pakEntry));
+                    return false;
+                }
+                g_steamCacheManager.StoreStarPakToc(ctx.depotId, ctx.manifestId, remoteFile.depotPath, pakEntry->parsedOffsets);
+                pakEntry->source = std::move(steamSource);
+            }
+            else
+            {
+                pakEntry->source = std::make_unique<CSteamStarPakSource>(remoteFile.depotPath, static_cast<uint64_t>(remoteFile.size));
+            }
 
-        // [rika]: we should not being adding invalid starpak entries, these only really appear in pak V6 (possibly a bakery issue?)
-        if (entry.size == 0)
-            continue;
-
-        pakEntry.get()->parsedOffsets.emplace(entry.offset, entry.size);
+            pakEntry->filePath = remoteFile.depotPath;
+            Log("STRM: Using Steam source for starpak \"%s\"\n", remoteFile.depotPath.c_str());
+            opt ? m_vOptStarPaks.emplace_back(std::move(pakEntry)) : m_vStarPaks.emplace_back(std::move(pakEntry));
+            return true;
+        }
     }
 
+    // Always emplace an entry so positional starpak indices stay aligned with
+    // asset references, even when the file can't be resolved.
+    g_assetData.Log_Warning(this, "Failed to open StarPak file \"%s\". Assets may be missing data", fileName.c_str());
+    pakEntry->source = std::make_unique<CNullStarPakSource>();
     opt ? m_vOptStarPaks.emplace_back(std::move(pakEntry)) : m_vStarPaks.emplace_back(std::move(pakEntry));
-    return true;
+    return false;
 }
 
 const bool CPakFile::DecompressFileBuffer(const char* fileBuffer, std::shared_ptr<char[]>* outBuffer)
