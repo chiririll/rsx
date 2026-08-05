@@ -57,6 +57,36 @@ namespace
 		}
 	};
 
+	// tek-steamclient is a MinGW build that allocates via the release UCRT heap.
+	// In Debug (/MDd) MSVC's free() goes through the debug CRT and will crash on
+	// those pointers — always release tek-owned blocks through ucrtbase!free.
+	void TekHeapFree(void* ptr)
+	{
+		if (!ptr)
+			return;
+
+		using FreeFn = void(__cdecl*)(void*);
+		static FreeFn s_ucrtFree = []() -> FreeFn
+			{
+				HMODULE ucrt = GetModuleHandleW(L"ucrtbase.dll");
+				if (!ucrt)
+					ucrt = LoadLibraryW(L"ucrtbase.dll");
+				if (!ucrt)
+					return nullptr;
+				return reinterpret_cast<FreeFn>(GetProcAddress(ucrt, "free"));
+			}();
+
+		if (s_ucrtFree)
+			s_ucrtFree(ptr);
+		else
+			free(ptr);
+	}
+
+	struct TekHeapDeleter
+	{
+		void operator()(void* ptr) const { TekHeapFree(ptr); }
+	};
+
 	std::string FormatTekError(const tek_sc_err& err)
 	{
 		if (tek_sc_err_success(&err))
@@ -75,7 +105,7 @@ namespace
 			message += " [";
 			message += err.uri;
 			message += "]";
-			free(const_cast<char*>(err.uri));
+			TekHeapFree(const_cast<char*>(err.uri));
 		}
 		return message;
 	}
@@ -159,7 +189,7 @@ void CSteamClient::Shutdown()
 
 	if (m_impl->serversAllocation)
 	{
-		free(m_impl->serversAllocation);
+		TekHeapFree(m_impl->serversAllocation);
 		m_impl->serversAllocation = nullptr;
 	}
 	m_impl->servers.clear();
@@ -784,7 +814,7 @@ bool CSteamClient::FetchManifest(uint64_t manifestId, std::string& outError)
 	}
 
 	const tek_sc_err parseErr = tek_sc_dm_parse(dm.common.data, dm.common.data_size, m_impl->depotKey, &m_impl->manifest);
-	free(dm.common.data);
+	TekHeapFree(dm.common.data);
 
 	if (!tek_sc_err_success(&parseErr))
 	{
@@ -915,10 +945,14 @@ bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::
 		return false;
 	}
 
+	// Own the tek-allocated buffer with the matching UCRT free (see TekHeapFree).
+	std::unique_ptr<void, TekHeapDeleter> productInfo(appEntry.data);
+	appEntry.data = nullptr;
+
 	uint64_t resolvedManifest = 0;
 	try
 	{
-		std::string vdfText(static_cast<const char*>(appEntry.data), static_cast<size_t>(appEntry.data_size));
+		std::string vdfText(static_cast<const char*>(productInfo.get()), static_cast<size_t>(appEntry.data_size));
 		// Product info may be binary VDF; try text parse first.
 		auto root = tyti::vdf::read(vdfText.begin(), vdfText.end());
 		// Typical path: depots/<depotId>/manifests/<branch> or depots/<depotId>/manifests/public
@@ -971,11 +1005,8 @@ bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::
 	catch (const std::exception& ex)
 	{
 		outError = std::string("Failed to parse Steam product info VDF: ") + ex.what();
-		free(appEntry.data);
 		return false;
 	}
-
-	free(appEntry.data);
 
 	if (resolvedManifest == 0)
 	{
