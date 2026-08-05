@@ -6,6 +6,7 @@
 #include <condition_variable>
 
 #include <thirdparty/imgui/misc/imgui_utility.h>
+#include <thirdparty/qrcodegen/qrcodegen.hpp>
 #include <misc/ImGuiNotify.hpp>
 
 #include <core/steam/steamclient.h>
@@ -27,6 +28,15 @@ struct SteamWindowState_t
 	std::condition_variable guardCv;
 	bool guardReady = false;
 	bool guardCancelled = false;
+
+	// QR login
+	bool qrActive = false;
+	bool qrAwaitingConfirm = false;
+	std::atomic<bool> qrCancel{ false };
+	std::mutex qrMutex;
+	std::string qrUrl;
+	std::string qrEncodedUrl;
+	std::unique_ptr<qrcodegen::QrCode> qrCode;
 
 	char appId[32]{ "1237970" }; // Titanfall 2 default; user can change
 	char depotId[32]{};
@@ -60,6 +70,122 @@ static void SteamStatus(const std::string& msg)
 	Log("STEAM: %s\n", msg.c_str());
 }
 
+static void RefreshQrCodeIfNeeded()
+{
+	std::string url;
+	{
+		std::lock_guard lock(s_steamUi.qrMutex);
+		url = s_steamUi.qrUrl;
+	}
+
+	if (url.empty() || url == s_steamUi.qrEncodedUrl)
+		return;
+
+	try
+	{
+		s_steamUi.qrCode = std::make_unique<qrcodegen::QrCode>(
+			qrcodegen::QrCode::encodeText(url.c_str(), qrcodegen::QrCode::Ecc::MEDIUM));
+		s_steamUi.qrEncodedUrl = url;
+	}
+	catch (const std::exception& ex)
+	{
+		SteamStatus(std::string("Failed to encode QR: ") + ex.what());
+	}
+}
+
+static void DrawQrCodeWidget()
+{
+	RefreshQrCodeIfNeeded();
+
+	if (!s_steamUi.qrCode)
+		return;
+
+	const qrcodegen::QrCode& qr = *s_steamUi.qrCode;
+	const int modules = qr.getSize();
+	if (modules <= 0)
+		return;
+
+	constexpr float kDisplaySize = 220.f;
+	constexpr int kBorder = 2;
+	const float cell = kDisplaySize / static_cast<float>(modules + kBorder * 2);
+
+	const ImVec2 origin = ImGui::GetCursorScreenPos();
+	ImDrawList* const draw = ImGui::GetWindowDrawList();
+	draw->AddRectFilled(origin,
+		ImVec2(origin.x + kDisplaySize, origin.y + kDisplaySize),
+		IM_COL32(255, 255, 255, 255));
+
+	for (int y = 0; y < modules; ++y)
+	{
+		for (int x = 0; x < modules; ++x)
+		{
+			if (!qr.getModule(x, y))
+				continue;
+
+			const float x0 = origin.x + (x + kBorder) * cell;
+			const float y0 = origin.y + (y + kBorder) * cell;
+			draw->AddRectFilled(ImVec2(x0, y0), ImVec2(x0 + cell + 0.5f, y0 + cell + 0.5f),
+				IM_COL32(0, 0, 0, 255));
+		}
+	}
+
+	ImGui::Dummy(ImVec2(kDisplaySize, kDisplaySize));
+}
+
+static void StartQrLogin()
+{
+	s_steamUi.busy = true;
+	s_steamUi.qrActive = true;
+	s_steamUi.qrAwaitingConfirm = false;
+	s_steamUi.qrCancel.store(false);
+	{
+		std::lock_guard lock(s_steamUi.qrMutex);
+		s_steamUi.qrUrl.clear();
+		s_steamUi.qrEncodedUrl.clear();
+	}
+	SteamStatus("Waiting for Steam QR...");
+
+	CThread([]()
+		{
+			std::string error;
+			const bool ok = g_steamClient.LoginWithQr(s_steamUi.rememberLogin,
+				[](const std::string& url)
+				{
+					std::lock_guard lock(s_steamUi.qrMutex);
+					if (url.empty())
+					{
+						s_steamUi.qrAwaitingConfirm = true;
+						s_steamUi.status = "Confirm login in the Steam mobile app...";
+					}
+					else
+					{
+						s_steamUi.qrUrl = url;
+						s_steamUi.qrAwaitingConfirm = false;
+						s_steamUi.status = "Scan the QR code with the Steam mobile app";
+					}
+				},
+				&s_steamUi.qrCancel, error);
+
+			s_steamUi.qrActive = false;
+			s_steamUi.qrAwaitingConfirm = false;
+			{
+				std::lock_guard lock(s_steamUi.qrMutex);
+				s_steamUi.qrUrl.clear();
+			}
+
+			if (!ok)
+				SteamStatus("QR login failed: " + error);
+			else
+			{
+				SteamStatus("Logged in via QR");
+				const std::string user = g_steamClient.GetRememberedUsername();
+				if (!user.empty())
+					strncpy_s(s_steamUi.username, user.c_str(), _TRUNCATE);
+			}
+			s_steamUi.busy = false;
+		}).detach();
+}
+
 static void DrawSteamLoadWindow()
 {
 	if (!s_steamUi.open)
@@ -73,8 +199,9 @@ static void DrawSteamLoadWindow()
 	}
 
 	const bool busy = s_steamUi.busy;
+	const bool qrActive = s_steamUi.qrActive;
 
-	ImGui::BeginDisabled(busy);
+	ImGui::BeginDisabled(busy && !qrActive);
 
 	ImGui::SeparatorText("Account");
 	ImGui::InputText("Username", s_steamUi.username, IM_ARRAYSIZE(s_steamUi.username));
@@ -103,7 +230,7 @@ static void DrawSteamLoadWindow()
 			s_steamUi.awaitingGuard = false;
 		}
 	}
-	else if (ImGui::Button("Login"))
+	else if (!qrActive && ImGui::Button("Login"))
 	{
 		s_steamUi.busy = true;
 		SteamStatus("Logging in...");
@@ -136,20 +263,53 @@ static void DrawSteamLoadWindow()
 			}).detach();
 	}
 
-	ImGui::SameLine();
-	if (ImGui::Button("Anonymous login"))
+	if (!qrActive)
 	{
-		s_steamUi.busy = true;
-		CThread([]()
-			{
-				std::string error;
-				if (!g_steamClient.LoginAnonymous(error))
-					SteamStatus("Anonymous login failed: " + error);
-				else
-					SteamStatus("Logged in anonymously");
-				s_steamUi.busy = false;
-			}).detach();
+		ImGui::SameLine();
+		if (ImGui::Button("Login with QR"))
+			StartQrLogin();
+
+		ImGui::SameLine();
+		if (ImGui::Button("Anonymous login"))
+		{
+			s_steamUi.busy = true;
+			CThread([]()
+				{
+					std::string error;
+					if (!g_steamClient.LoginAnonymous(error))
+						SteamStatus("Anonymous login failed: " + error);
+					else
+						SteamStatus("Logged in anonymously");
+					s_steamUi.busy = false;
+				}).detach();
+		}
 	}
+
+	ImGui::EndDisabled();
+
+	if (qrActive)
+	{
+		ImGui::SeparatorText("Steam QR login");
+		if (s_steamUi.qrAwaitingConfirm)
+			ImGui::TextWrapped("Confirm the login in your Steam mobile app.");
+		else
+			ImGui::TextWrapped("Scan this QR code with the Steam mobile app.");
+
+		bool hasUrl = false;
+		{
+			std::lock_guard lock(s_steamUi.qrMutex);
+			hasUrl = !s_steamUi.qrUrl.empty();
+		}
+		if (hasUrl)
+			DrawQrCodeWidget();
+		else if (!s_steamUi.qrAwaitingConfirm)
+			ImGui::TextUnformatted("Requesting QR...");
+
+		if (ImGui::Button("Cancel QR login"))
+			s_steamUi.qrCancel.store(true);
+	}
+
+	ImGui::BeginDisabled(busy);
 
 	ImGui::SeparatorText("Depot");
 	ImGui::InputText("App ID", s_steamUi.appId, IM_ARRAYSIZE(s_steamUi.appId));
