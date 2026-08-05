@@ -47,6 +47,8 @@ struct SteamWindowState_t
 	std::vector<SteamDepotInfo_t> depotInfos;
 	int selectedDepotIndex = -1;
 
+	// Touched from worker threads and the UI frame — always take listMutex.
+	std::mutex listMutex;
 	std::vector<SteamDepotFile_t> rpakFiles;
 	std::vector<bool> selected;
 	char filter[128]{};
@@ -489,19 +491,26 @@ static void DrawSteamLoadWindow()
 					return;
 				}
 
-				s_steamUi.rpakFiles.clear();
+				std::vector<SteamDepotFile_t> rpaks;
 				for (const auto& file : files)
 				{
 					if (file.depotPath.ends_with(".rpak"))
-						s_steamUi.rpakFiles.push_back(file);
+						rpaks.push_back(file);
 				}
-				s_steamUi.selected.assign(s_steamUi.rpakFiles.size(), false);
+				std::vector<bool> sel(rpaks.size(), false);
+				const size_t rpakCount = rpaks.size();
+
+				{
+					std::lock_guard lock(s_steamUi.listMutex);
+					s_steamUi.rpakFiles.swap(rpaks);
+					s_steamUi.selected.swap(sel);
+				}
 
 				const auto& ctx = g_steamClient.GetDepotContext();
 				snprintf(s_steamUi.depotId, IM_ARRAYSIZE(s_steamUi.depotId), "%u", ctx.depotId);
 				snprintf(s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId), "%llu",
 					static_cast<unsigned long long>(ctx.manifestId));
-				SteamStatus(std::format("Pinned depot {} manifest {} ({} rpaks)", ctx.depotId, ctx.manifestId, s_steamUi.rpakFiles.size()));
+				SteamStatus(std::format("Pinned depot {} manifest {} ({} rpaks)", ctx.depotId, ctx.manifestId, rpakCount));
 				s_steamUi.busy = false;
 			}).detach();
 	}
@@ -541,6 +550,10 @@ static void DrawSteamLoadWindow()
 
 	if (ImGui::BeginChild("rpak_list", ImVec2(0, -60), ImGuiChildFlags_Borders))
 	{
+		std::lock_guard lock(s_steamUi.listMutex);
+		if (s_steamUi.selected.size() != s_steamUi.rpakFiles.size())
+			s_steamUi.selected.assign(s_steamUi.rpakFiles.size(), false);
+
 		for (size_t i = 0; i < s_steamUi.rpakFiles.size(); ++i)
 		{
 			const auto& file = s_steamUi.rpakFiles[i];
@@ -557,10 +570,16 @@ static void DrawSteamLoadWindow()
 	if (ImGui::Button("Download & load selected"))
 	{
 		std::vector<std::string> selectedPaths;
-		for (size_t i = 0; i < s_steamUi.rpakFiles.size(); ++i)
 		{
-			if (s_steamUi.selected[i])
-				selectedPaths.push_back(s_steamUi.rpakFiles[i].depotPath);
+			std::lock_guard lock(s_steamUi.listMutex);
+			if (s_steamUi.selected.size() != s_steamUi.rpakFiles.size())
+				s_steamUi.selected.assign(s_steamUi.rpakFiles.size(), false);
+
+			for (size_t i = 0; i < s_steamUi.rpakFiles.size(); ++i)
+			{
+				if (s_steamUi.selected[i])
+					selectedPaths.push_back(s_steamUi.rpakFiles[i].depotPath);
+			}
 		}
 
 		if (selectedPaths.empty())
