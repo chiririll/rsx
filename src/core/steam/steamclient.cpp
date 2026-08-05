@@ -8,6 +8,8 @@
 #include <core/steam/steamclient.h>
 #include <core/steam/steamcache.h>
 #include <core/steam/binary_vdf.h>
+#include <core/steam/steam_depot_util.h>
+#include <core/steam/steam_token_blob.h>
 
 #include <thirdparty/valvefilevdf/vdf_parser.hpp>
 
@@ -609,19 +611,7 @@ std::filesystem::path CSteamClient::TokenFilePath()
 
 bool CSteamClient::SaveToken(const std::string& username, const std::string& token) const
 {
-	// Simple length-prefixed blob: u32 userLen, user bytes, u32 tokenLen, token bytes.
-	std::vector<char> blob;
-	const auto appendStr = [&](const std::string& s)
-		{
-			const uint32_t len = static_cast<uint32_t>(s.size());
-			const size_t off = blob.size();
-			blob.resize(off + 4 + s.size());
-			memcpy(blob.data() + off, &len, 4);
-			memcpy(blob.data() + off + 4, s.data(), s.size());
-		};
-	appendStr(username);
-	appendStr(token);
-
+	const std::vector<char> blob = SerializeAuthToken(username, token);
 	StreamIO file;
 	if (!file.open(TokenFilePath().string(), eStreamIOMode::Write))
 		return false;
@@ -636,28 +626,12 @@ bool CSteamClient::LoadToken(std::string& username, std::string& token) const
 		return false;
 
 	const size_t size = file.size();
-	if (size < 8)
+	if (size == 0)
 		return false;
 
 	std::vector<char> blob(size);
 	file.read(blob.data(), size);
-
-	size_t pos = 0;
-	const auto readStr = [&](std::string& out) -> bool
-		{
-			if (pos + 4 > blob.size())
-				return false;
-			uint32_t len = 0;
-			memcpy(&len, blob.data() + pos, 4);
-			pos += 4;
-			if (pos + len > blob.size())
-				return false;
-			out.assign(blob.data() + pos, len);
-			pos += len;
-			return true;
-		};
-
-	return readStr(username) && readStr(token);
+	return DeserializeAuthToken(blob.data(), blob.size(), username, token);
 }
 
 void CSteamClient::ClearToken() const
@@ -704,22 +678,7 @@ std::wstring CSteamClient::Utf8ToWide(const std::string& str)
 
 std::string CSteamClient::NormalizeDepotPath(const std::string& path)
 {
-	std::string out = path;
-	std::replace(out.begin(), out.end(), '\\', '/');
-	while (!out.empty() && (out.front() == '/' || out.front() == '.'))
-	{
-		if (out.front() == '.')
-		{
-			if (out.size() >= 2 && out[1] == '/')
-				out.erase(0, 2);
-			else
-				break;
-		}
-		else
-			out.erase(out.begin());
-	}
-	std::transform(out.begin(), out.end(), out.begin(), [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	return out;
+	return ::NormalizeDepotPath(path);
 }
 
 bool CSteamClient::EnsureLicenses(std::string& outError)
@@ -1018,33 +977,6 @@ void CSteamClient::ClearDepotContext()
 
 namespace
 {
-	uint64_t ManifestIdFromDepotNode(const BinaryVdfNode& depotNode, const std::string& branch)
-	{
-		const BinaryVdfNode* manifests = depotNode.FindChild("manifests");
-		if (!manifests)
-			return 0;
-
-		auto readBranch = [&](std::string_view name) -> uint64_t
-			{
-				const BinaryVdfNode* branchNode = manifests->FindChild(name);
-				if (!branchNode)
-					return 0;
-				if (branchNode->hasString)
-					return std::strtoull(branchNode->stringValue.c_str(), nullptr, 10);
-				if (branchNode->hasInt)
-					return branchNode->intValue;
-				const uint64_t gid = branchNode->GetUInt64("gid");
-				if (gid != 0)
-					return gid;
-				return branchNode->GetUInt64("id");
-			};
-
-		uint64_t id = readBranch(branch);
-		if (id == 0 && branch != "public")
-			id = readBranch("public");
-		return id;
-	}
-
 	bool FetchProductInfoTree(tek_sc_cm_client* cm, tek_sc_lib_ctx* lib, CallbackWaiter& waiter, uint32_t appId,
 		BinaryVdfNode& outRoot, std::string& outError)
 	{
@@ -1153,66 +1085,11 @@ bool CSteamClient::QueryAppDepots(uint32_t appId, const std::string& branch,
 	if (!EnsureLicenses(outError))
 		return false;
 
-	BinaryVdfNode root;
-	if (!FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, appId, root, outError))
-		return false;
-
-	const BinaryVdfNode* depots = root.FindChildRecursive("depots");
-	if (!depots)
-	{
-		outError = "Product info has no depots section";
-		return false;
-	}
-
-	outDepots.clear();
-	const std::string branchName = branch.empty() ? "public" : branch;
-	for (const BinaryVdfNode& child : depots->children)
-	{
-		// Depot keys are numeric; skip "branches", "baselanguages", etc.
-		if (child.name.empty() || !std::isdigit(static_cast<unsigned char>(child.name[0])))
-			continue;
-
-		SteamDepotInfo_t info;
-		info.depotId = static_cast<uint32_t>(std::strtoul(child.name.c_str(), nullptr, 10));
-		if (info.depotId == 0)
-			continue;
-
-		info.name = child.GetString("name");
-		info.depotFromApp = static_cast<uint32_t>(child.GetUInt64("depotfromapp"));
-		if (const BinaryVdfNode* config = child.FindChild("config"))
-			info.oslist = config->GetString("oslist");
-		info.branchManifestId = ManifestIdFromDepotNode(child, branchName);
-
-		// Shared depots may only list manifests on the parent app.
-		if (info.branchManifestId == 0 && info.depotFromApp != 0 && info.depotFromApp != appId)
+	const ProductInfoProvider provider = [this](uint32_t id, BinaryVdfNode& root, std::string& err) -> bool
 		{
-			BinaryVdfNode parentRoot;
-			std::string parentError;
-			if (FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, info.depotFromApp, parentRoot, parentError))
-			{
-				const BinaryVdfNode* parentDepots = parentRoot.FindChildRecursive("depots");
-				const BinaryVdfNode* parentDepot = parentDepots
-					? parentDepots->FindChild(std::to_string(info.depotId))
-					: nullptr;
-				if (parentDepot)
-					info.branchManifestId = ManifestIdFromDepotNode(*parentDepot, branchName);
-			}
-		}
-
-		outDepots.emplace_back(std::move(info));
-	}
-
-	std::sort(outDepots.begin(), outDepots.end(), [](const SteamDepotInfo_t& a, const SteamDepotInfo_t& b)
-		{
-			return a.depotId < b.depotId;
-		});
-
-	if (outDepots.empty())
-	{
-		outError = "No depots found in product info";
-		return false;
-	}
-	return true;
+			return FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, id, root, err);
+		};
+	return BuildDepotList(appId, branch, provider, outDepots, outError);
 }
 
 bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::string& branch,
@@ -1231,12 +1108,21 @@ bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::
 	if (!EnsureLicenses(outError))
 		return false;
 
+	const ProductInfoProvider provider = [this](uint32_t id, BinaryVdfNode& root, std::string& err) -> bool
+		{
+			return FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, id, root, err);
+		};
+
+	ResolvedDepot_t resolved;
+	if (!ResolveDepotTarget(appId, depotId, branch, manifestId, provider, resolved, outError))
+		return false;
+
 	const SteamDepotContext_t previous = m_ctx;
 	m_ctx.appId = appId;
 	m_ctx.depotId = depotId;
-	m_ctx.keyAppId = appId;
+	m_ctx.keyAppId = resolved.keyAppId;
 	m_ctx.branch = branch.empty() ? "public" : branch;
-	m_ctx.manifestId = 0;
+	m_ctx.manifestId = resolved.manifestId;
 	m_impl->hasDepotKey = false;
 	if (m_impl->decCtx)
 	{
@@ -1244,62 +1130,6 @@ bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::
 		m_impl->decCtx = nullptr;
 	}
 
-	uint64_t resolvedManifest = manifestId;
-	uint32_t depotFromApp = 0;
-
-	BinaryVdfNode root;
-	const bool haveProductInfo = FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, appId, root, outError);
-	if (!haveProductInfo && resolvedManifest == 0)
-	{
-		m_ctx = previous;
-		return false;
-	}
-
-	if (haveProductInfo)
-	{
-		const BinaryVdfNode* depots = root.FindChildRecursive("depots");
-		const BinaryVdfNode* depotNode = depots ? depots->FindChild(std::to_string(depotId)) : nullptr;
-		if (depotNode)
-		{
-			depotFromApp = static_cast<uint32_t>(depotNode->GetUInt64("depotfromapp"));
-			if (depotFromApp != 0)
-				m_ctx.keyAppId = depotFromApp;
-
-			if (resolvedManifest == 0)
-			{
-				resolvedManifest = ManifestIdFromDepotNode(*depotNode, m_ctx.branch);
-				if (resolvedManifest == 0 && depotFromApp != 0 && depotFromApp != appId)
-				{
-					BinaryVdfNode parentRoot;
-					std::string parentError;
-					if (FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, depotFromApp, parentRoot, parentError))
-					{
-						const BinaryVdfNode* parentDepots = parentRoot.FindChildRecursive("depots");
-						const BinaryVdfNode* parentDepot = parentDepots
-							? parentDepots->FindChild(std::to_string(depotId))
-							: nullptr;
-						if (parentDepot)
-							resolvedManifest = ManifestIdFromDepotNode(*parentDepot, m_ctx.branch);
-					}
-				}
-			}
-		}
-		else if (resolvedManifest == 0)
-		{
-			outError = "Depot " + std::to_string(depotId) + " not found in app product info";
-			m_ctx = previous;
-			return false;
-		}
-	}
-
-	if (resolvedManifest == 0)
-	{
-		outError = "Could not resolve manifest ID for depot/branch; enter a manifest ID manually";
-		m_ctx = previous;
-		return false;
-	}
-
-	m_ctx.manifestId = resolvedManifest;
 	if (!EnsureManifest(outError))
 	{
 		m_ctx = previous;

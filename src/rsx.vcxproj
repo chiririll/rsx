@@ -23,6 +23,9 @@
     <ClInclude Include="core\bridge\bridge.h" />
     <ClInclude Include="core\cache\cachedb.h" />
     <ClInclude Include="core\steam\binary_vdf.h" />
+    <ClInclude Include="core\steam\steam_depot_util.h" />
+    <ClInclude Include="core\steam\steam_token_blob.h" />
+    <ClInclude Include="core\steam\steam_types.h" />
     <ClInclude Include="core\steam\steamcache.h" />
     <ClInclude Include="core\steam\steamclient.h" />
     <ClInclude Include="core\steam\steam_load.h" />
@@ -171,7 +174,24 @@
     <ClCompile Include="core\audio\audioplayer.cpp" />
     <ClCompile Include="core\bridge\bridge.cpp" />
     <ClCompile Include="core\cache\cachedb.cpp" />
-    <ClCompile Include="core\steam\binary_vdf.cpp" />
+    <ClCompile Include="core\steam\binary_vdf.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_CI|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_NoGui|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="core\steam\steam_depot_util.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_CI|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_NoGui|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
+    <ClCompile Include="core\steam\steam_token_blob.cpp">
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_CI|x64'">NotUsing</PrecompiledHeader>
+      <PrecompiledHeader Condition="'$(Configuration)|$(Platform)'=='Release_NoGui|x64'">NotUsing</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="core\steam\steamcache.cpp" />
     <ClCompile Include="core\steam\steamclient.cpp" />
     <ClCompile Include="core\steam\steam_load.cpp" />

@@ -14,6 +14,8 @@ jobs:
         uses: microsoft/setup-msbuild@v1.1
       - name: Build
         run: msbuild /p:Configuration=${{ env.BUILD_PROFILE }}
+      - name: Unit tests
+        run: .\bin\${{ env.BUILD_PROFILE }}\rsx_tests.exe
       - name: Extract Short Commit Hash
         id: extract
         shell: bash
