@@ -7,6 +7,7 @@
 #include <core/steam/tek_includes.h>
 #include <core/steam/steamclient.h>
 #include <core/steam/steamcache.h>
+#include <core/steam/binary_vdf.h>
 
 #include <thirdparty/valvefilevdf/vdf_parser.hpp>
 
@@ -119,6 +120,7 @@ struct CSteamClient::Impl
 	bool hasManifest = false;
 	tek_sc_aes256_key depotKey{};
 	bool hasDepotKey = false;
+	bool licensesFetched = false;
 	tek_sc_sp_dec_ctx* decCtx = nullptr;
 
 	std::vector<tek_sc_cm_sp_srv_entry> servers;
@@ -186,6 +188,7 @@ void CSteamClient::Shutdown()
 	m_impl->fileIndex.clear();
 	m_impl->basenameIndex.clear();
 	m_impl->hasDepotKey = false;
+	m_impl->licensesFetched = false;
 
 	if (m_impl->serversAllocation)
 	{
@@ -210,6 +213,7 @@ void CSteamClient::Shutdown()
 
 	m_connected = false;
 	m_signedIn = false;
+	m_anonymous = false;
 }
 
 bool CSteamClient::EnsureConnected(std::string& outError)
@@ -276,6 +280,10 @@ bool CSteamClient::LoginAnonymous(std::string& outError)
 	}
 
 	m_username.clear();
+	m_anonymous = true;
+	m_impl->licensesFetched = false;
+	EnsureLicenses(outError); // best-effort; anonymous rarely needs package tokens
+	outError.clear();
 	return true;
 }
 
@@ -301,6 +309,11 @@ bool CSteamClient::LoginWithToken(const std::string& token, std::string& outErro
 		outError = FormatTekError(m_impl->waiter.result);
 		return false;
 	}
+
+	m_anonymous = false;
+	m_impl->licensesFetched = false;
+	if (!EnsureLicenses(outError))
+		return false;
 
 	return true;
 }
@@ -427,24 +440,66 @@ bool CSteamClient::Login(const std::string& username, const std::string& passwor
 	return true;
 }
 
+bool CSteamClient::TryRestoreSession(std::string& outError)
+{
+	if (m_signedIn)
+		return true;
+
+	std::string savedUser;
+	std::string savedToken;
+	if (!LoadToken(savedUser, savedToken))
+	{
+		outError = "No saved Steam login token";
+		return false;
+	}
+
+	if (LoginWithToken(savedToken, outError))
+	{
+		m_username = savedUser;
+		Log("STEAM: Restored session for %s\n", savedUser.c_str());
+		return true;
+	}
+
+	// Sign-in failed — try renewing the refresh token first.
+	const std::string signInError = outError;
+	if (!EnsureConnected(outError))
+		return false;
+
+	std::string renewedToken;
+	m_impl->waiter.Reset();
+	m_impl->waiter.onData = [&](void* data)
+		{
+			const auto* resp = static_cast<const tek_sc_cm_data_renew_token*>(data);
+			m_impl->waiter.result = resp->result;
+			if (tek_sc_err_success(&resp->result) && resp->new_token)
+				renewedToken = resp->new_token;
+		};
+
+	tek_sc_cm_auth_renew_token(m_impl->cm, savedToken.c_str(), &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
+	if (m_impl->waiter.Wait(kDefaultTimeoutMs, outError) && !renewedToken.empty())
+	{
+		if (LoginWithToken(renewedToken, outError))
+		{
+			m_username = savedUser;
+			SaveToken(savedUser, renewedToken);
+			Log("STEAM: Renewed and restored session for %s\n", savedUser.c_str());
+			return true;
+		}
+	}
+
+	// Keep the old token file if renew quietly failed (Steam may leave it valid);
+	// only clear when sign-in explicitly rejected it.
+	outError = signInError.empty() ? "Saved Steam login expired; please sign in again" : signInError;
+	ClearToken();
+	return false;
+}
+
 bool CSteamClient::LoginWithQr(bool rememberLogin, const QrUrlCallback& onUrl,
 	std::atomic<bool>* cancelFlag, std::string& outError)
 {
-	if (rememberLogin)
-	{
-		std::string savedUser;
-		std::string savedToken;
-		if (LoadToken(savedUser, savedToken))
-		{
-			if (LoginWithToken(savedToken, outError))
-			{
-				m_username = savedUser;
-				return true;
-			}
-			ClearToken();
-			outError.clear();
-		}
-	}
+	if (rememberLogin && TryRestoreSession(outError))
+		return true;
+	outError.clear();
 
 	if (!EnsureConnected(outError))
 		return false;
@@ -521,6 +576,9 @@ bool CSteamClient::LoginWithQr(bool rememberLogin, const QrUrlCallback& onUrl,
 void CSteamClient::Logout()
 {
 	m_signedIn = false;
+	m_anonymous = false;
+	m_impl->licensesFetched = false;
+	ClearDepotContext();
 	if (m_connected && m_impl->cm)
 		tek_sc_cm_disconnect(m_impl->cm);
 	m_connected = false;
@@ -541,7 +599,12 @@ std::string CSteamClient::GetRememberedUsername() const
 
 std::filesystem::path CSteamClient::TokenFilePath()
 {
-	return std::filesystem::current_path() / kTokenFileName;
+	// Always next to the executable — CWD can change (drag/drop, dialogs).
+	wchar_t processPath[MAX_PATH]{};
+	const DWORD n = GetModuleFileNameW(nullptr, processPath, MAX_PATH);
+	if (n == 0 || n >= MAX_PATH)
+		return std::filesystem::current_path() / kTokenFileName;
+	return std::filesystem::path(processPath).parent_path() / kTokenFileName;
 }
 
 bool CSteamClient::SaveToken(const std::string& username, const std::string& token) const
@@ -659,10 +722,55 @@ std::string CSteamClient::NormalizeDepotPath(const std::string& path)
 	return out;
 }
 
+bool CSteamClient::EnsureLicenses(std::string& outError)
+{
+	if (m_impl->licensesFetched)
+		return true;
+
+	if (!m_signedIn)
+	{
+		outError = "Not signed in";
+		return false;
+	}
+
+	// Steam authorizes depot keys against the account license list. Fetch it
+	// after sign-in so GetDepotDecryptionKey does not fail with FileNotFound.
+	m_impl->waiter.Reset();
+	m_impl->waiter.onData = [&](void* data)
+		{
+			const auto* resp = static_cast<const tek_sc_cm_data_lics*>(data);
+			m_impl->waiter.result = resp->result;
+		};
+
+	tek_sc_cm_get_licenses(m_impl->cm, &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
+	if (!m_impl->waiter.Wait(kDefaultTimeoutMs, outError))
+		return false;
+
+	if (!tek_sc_err_success(&m_impl->waiter.result))
+	{
+		outError = FormatTekError(m_impl->waiter.result);
+		if (outError.empty())
+			outError = "Failed to get Steam license list";
+		return false;
+	}
+
+	m_impl->licensesFetched = true;
+	return true;
+}
+
 bool CSteamClient::EnsureDepotKey(std::string& outError)
 {
 	if (m_impl->hasDepotKey)
 		return true;
+
+	if (m_anonymous)
+	{
+		outError = "Depot decryption keys require a full Steam login that owns the game (anonymous cannot decrypt)";
+		return false;
+	}
+
+	if (!EnsureLicenses(outError))
+		return false;
 
 	if (g_steamCacheManager.TryGetDepotKey(m_ctx.depotId, m_impl->depotKey))
 	{
@@ -671,8 +779,10 @@ bool CSteamClient::EnsureDepotKey(std::string& outError)
 		return true;
 	}
 
+	const uint32_t keyAppId = m_ctx.keyAppId != 0 ? m_ctx.keyAppId : m_ctx.appId;
+
 	tek_sc_cm_data_depot_key data{};
-	data.app_id = m_ctx.appId;
+	data.app_id = keyAppId;
 	data.depot_id = m_ctx.depotId;
 
 	m_impl->waiter.Reset();
@@ -692,7 +802,9 @@ bool CSteamClient::EnsureDepotKey(std::string& outError)
 	{
 		outError = FormatTekError(m_impl->waiter.result);
 		if (outError.empty())
-			outError = "Failed to get depot decryption key (account may not own this app)";
+			outError = "Failed to get depot decryption key";
+		outError += " — account must own this app (QR/password login, not anonymous). "
+			"Also verify app/depot IDs match SteamDB.";
 		return false;
 	}
 
@@ -886,136 +998,315 @@ bool CSteamClient::EnsureManifest(std::string& outError)
 	return true;
 }
 
-bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::string& branch,
-	uint64_t manifestId, std::string& outError)
+void CSteamClient::ClearDepotContext()
 {
-	if (!m_signedIn && !EnsureConnected(outError))
-		return false;
-
-	m_ctx.appId = appId;
-	m_ctx.depotId = depotId;
-	m_ctx.branch = branch.empty() ? "public" : branch;
+	m_ctx = {};
 	m_impl->hasDepotKey = false;
-
-	if (manifestId != 0)
+	if (m_impl->hasManifest)
 	{
-		m_ctx.manifestId = manifestId;
-		return EnsureManifest(outError);
+		tek_sc_dm_free(&m_impl->manifest);
+		m_impl->hasManifest = false;
 	}
-
-	// Resolve latest manifest for branch via PICS product info.
-	tek_sc_cm_pics_entry appEntry{};
-	appEntry.id = appId;
-
-	tek_sc_cm_data_pics tokenReq{};
-	tokenReq.app_entries = &appEntry;
-	tokenReq.num_app_entries = 1;
-	tokenReq.timeout_ms = kDefaultTimeoutMs;
-
-	m_impl->waiter.Reset();
-	m_impl->waiter.onData = [&](void* data)
-		{
-			const auto* resp = static_cast<const tek_sc_cm_data_pics*>(data);
-			m_impl->waiter.result = resp->result;
-		};
-	tek_sc_cm_get_access_token(m_impl->cm, &tokenReq, &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
-	if (!m_impl->waiter.Wait(kDefaultTimeoutMs, outError))
-		return false;
-
-	tek_sc_cm_data_pics infoReq{};
-	infoReq.app_entries = &appEntry;
-	infoReq.num_app_entries = 1;
-	infoReq.timeout_ms = kDefaultTimeoutMs;
-
-	m_impl->waiter.Reset();
-	m_impl->waiter.onData = [&](void* data)
-		{
-			const auto* resp = static_cast<const tek_sc_cm_data_pics*>(data);
-			m_impl->waiter.result = resp->result;
-		};
-	tek_sc_cm_get_product_info(m_impl->cm, &infoReq, &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
-	if (!m_impl->waiter.Wait(kDefaultTimeoutMs, outError))
-		return false;
-
-	if (!tek_sc_err_success(&m_impl->waiter.result) || !tek_sc_err_success(&appEntry.result) || !appEntry.data)
+	m_impl->fileIndex.clear();
+	m_impl->basenameIndex.clear();
+	if (m_impl->decCtx)
 	{
-		outError = FormatTekError(tek_sc_err_success(&m_impl->waiter.result) ? appEntry.result : m_impl->waiter.result);
-		if (outError.empty())
-			outError = "Failed to get Steam product info for app";
-		return false;
+		tek_sc_sp_dec_ctx_destroy(m_impl->decCtx);
+		m_impl->decCtx = nullptr;
 	}
+}
 
-	// Own the tek-allocated buffer with the matching UCRT free (see TekHeapFree).
-	std::unique_ptr<void, TekHeapDeleter> productInfo(appEntry.data);
-	appEntry.data = nullptr;
-
-	uint64_t resolvedManifest = 0;
-	try
+namespace
+{
+	uint64_t ManifestIdFromDepotNode(const BinaryVdfNode& depotNode, const std::string& branch)
 	{
-		std::string vdfText(static_cast<const char*>(productInfo.get()), static_cast<size_t>(appEntry.data_size));
-		// Product info may be binary VDF; try text parse first.
-		auto root = tyti::vdf::read(vdfText.begin(), vdfText.end());
-		// Typical path: depots/<depotId>/manifests/<branch> or depots/<depotId>/manifests/public
-		auto depots = root.childs.find("depots");
-		if (depots == root.childs.end())
-		{
-			// Sometimes root itself is the app object with nested "depots"
-			for (auto& [key, child] : root.childs)
+		const BinaryVdfNode* manifests = depotNode.FindChild("manifests");
+		if (!manifests)
+			return 0;
+
+		auto readBranch = [&](std::string_view name) -> uint64_t
 			{
-				if (child && child->childs.count("depots"))
+				const BinaryVdfNode* branchNode = manifests->FindChild(name);
+				if (!branchNode)
+					return 0;
+				if (branchNode->hasString)
+					return std::strtoull(branchNode->stringValue.c_str(), nullptr, 10);
+				if (branchNode->hasInt)
+					return branchNode->intValue;
+				const uint64_t gid = branchNode->GetUInt64("gid");
+				if (gid != 0)
+					return gid;
+				return branchNode->GetUInt64("id");
+			};
+
+		uint64_t id = readBranch(branch);
+		if (id == 0 && branch != "public")
+			id = readBranch("public");
+		return id;
+	}
+
+	bool FetchProductInfoTree(tek_sc_cm_client* cm, tek_sc_lib_ctx* lib, CallbackWaiter& waiter, uint32_t appId,
+		BinaryVdfNode& outRoot, std::string& outError)
+	{
+		tek_sc_cm_pics_entry appEntry{};
+		appEntry.id = appId;
+
+		tek_sc_cm_data_pics tokenReq{};
+		tokenReq.app_entries = &appEntry;
+		tokenReq.num_app_entries = 1;
+		tokenReq.timeout_ms = kDefaultTimeoutMs;
+
+		waiter.Reset();
+		waiter.onData = [&](void* data)
+			{
+				const auto* resp = static_cast<const tek_sc_cm_data_pics*>(data);
+				waiter.result = resp->result;
+			};
+		tek_sc_cm_get_access_token(cm, &tokenReq, &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
+		if (!waiter.Wait(kDefaultTimeoutMs, outError))
+			return false;
+
+		if (appEntry.access_token != 0)
+			tek_sc_lib_add_pics_at(lib, appId, appEntry.access_token);
+
+		tek_sc_cm_data_pics infoReq{};
+		infoReq.app_entries = &appEntry;
+		infoReq.num_app_entries = 1;
+		infoReq.timeout_ms = kDefaultTimeoutMs;
+
+		waiter.Reset();
+		waiter.onData = [&](void* data)
+			{
+				const auto* resp = static_cast<const tek_sc_cm_data_pics*>(data);
+				waiter.result = resp->result;
+			};
+		tek_sc_cm_get_product_info(cm, &infoReq, &CallbackWaiter::OnCallback, kDefaultTimeoutMs);
+		if (!waiter.Wait(kDefaultTimeoutMs, outError))
+			return false;
+
+		if (!tek_sc_err_success(&waiter.result) || !tek_sc_err_success(&appEntry.result) || !appEntry.data)
+		{
+			outError = FormatTekError(tek_sc_err_success(&waiter.result) ? appEntry.result : waiter.result);
+			if (outError.empty())
+				outError = "Failed to get Steam product info for app";
+			return false;
+		}
+
+		std::unique_ptr<void, TekHeapDeleter> productInfo(appEntry.data);
+		appEntry.data = nullptr;
+
+		if (ParseSteamProductInfo(productInfo.get(), static_cast<size_t>(appEntry.data_size), outRoot))
+			return true;
+
+		// Text VDF fallback.
+		try
+		{
+			std::string vdfText(static_cast<const char*>(productInfo.get()), static_cast<size_t>(appEntry.data_size));
+			auto root = tyti::vdf::read(vdfText.begin(), vdfText.end());
+			std::function<void(const tyti::vdf::object&, BinaryVdfNode&)> convert;
+			convert = [&](const tyti::vdf::object& src, BinaryVdfNode& dst)
 				{
-					depots = child->childs.find("depots");
-					break;
-				}
+					for (const auto& [k, v] : src.attribs)
+					{
+						BinaryVdfNode child;
+						child.name = k;
+						child.stringValue = v;
+						child.hasString = true;
+						dst.children.emplace_back(std::move(child));
+					}
+					for (const auto& [k, childPtr] : src.childs)
+					{
+						if (!childPtr)
+							continue;
+						BinaryVdfNode child;
+						child.name = k;
+						convert(*childPtr, child);
+						dst.children.emplace_back(std::move(child));
+					}
+				};
+			outRoot = {};
+			outRoot.name = "root";
+			convert(root, outRoot);
+			return !outRoot.children.empty();
+		}
+		catch (const std::exception& ex)
+		{
+			outError = std::string("Failed to parse Steam product info: ") + ex.what();
+			return false;
+		}
+	}
+} // namespace
+
+bool CSteamClient::QueryAppDepots(uint32_t appId, const std::string& branch,
+	std::vector<SteamDepotInfo_t>& outDepots, std::string& outError)
+{
+	if (!m_signedIn)
+	{
+		outError = "Sign in to Steam first (QR or account login)";
+		return false;
+	}
+	if (m_anonymous)
+	{
+		outError = "Anonymous login cannot query/decrypt owned depots. Use QR or account login.";
+		return false;
+	}
+	if (!EnsureLicenses(outError))
+		return false;
+
+	BinaryVdfNode root;
+	if (!FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, appId, root, outError))
+		return false;
+
+	const BinaryVdfNode* depots = root.FindChildRecursive("depots");
+	if (!depots)
+	{
+		outError = "Product info has no depots section";
+		return false;
+	}
+
+	outDepots.clear();
+	const std::string branchName = branch.empty() ? "public" : branch;
+	for (const BinaryVdfNode& child : depots->children)
+	{
+		// Depot keys are numeric; skip "branches", "baselanguages", etc.
+		if (child.name.empty() || !std::isdigit(static_cast<unsigned char>(child.name[0])))
+			continue;
+
+		SteamDepotInfo_t info;
+		info.depotId = static_cast<uint32_t>(std::strtoul(child.name.c_str(), nullptr, 10));
+		if (info.depotId == 0)
+			continue;
+
+		info.name = child.GetString("name");
+		info.depotFromApp = static_cast<uint32_t>(child.GetUInt64("depotfromapp"));
+		if (const BinaryVdfNode* config = child.FindChild("config"))
+			info.oslist = config->GetString("oslist");
+		info.branchManifestId = ManifestIdFromDepotNode(child, branchName);
+
+		// Shared depots may only list manifests on the parent app.
+		if (info.branchManifestId == 0 && info.depotFromApp != 0 && info.depotFromApp != appId)
+		{
+			BinaryVdfNode parentRoot;
+			std::string parentError;
+			if (FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, info.depotFromApp, parentRoot, parentError))
+			{
+				const BinaryVdfNode* parentDepots = parentRoot.FindChildRecursive("depots");
+				const BinaryVdfNode* parentDepot = parentDepots
+					? parentDepots->FindChild(std::to_string(info.depotId))
+					: nullptr;
+				if (parentDepot)
+					info.branchManifestId = ManifestIdFromDepotNode(*parentDepot, branchName);
 			}
 		}
 
-		if (depots != root.childs.end() && depots->second)
-		{
-			const std::string depotKey = std::to_string(depotId);
-			auto depotIt = depots->second->childs.find(depotKey);
-			if (depotIt != depots->second->childs.end() && depotIt->second)
-			{
-				auto manifests = depotIt->second->childs.find("manifests");
-				if (manifests != depotIt->second->childs.end() && manifests->second)
-				{
-					auto branchIt = manifests->second->attribs.find(m_ctx.branch);
-					if (branchIt == manifests->second->attribs.end())
-						branchIt = manifests->second->attribs.find("public");
-					if (branchIt != manifests->second->attribs.end())
-						resolvedManifest = std::strtoull(branchIt->second.c_str(), nullptr, 10);
+		outDepots.emplace_back(std::move(info));
+	}
 
-					// Some schemas nest branch as a child with "gid"
-					if (resolvedManifest == 0)
+	std::sort(outDepots.begin(), outDepots.end(), [](const SteamDepotInfo_t& a, const SteamDepotInfo_t& b)
+		{
+			return a.depotId < b.depotId;
+		});
+
+	if (outDepots.empty())
+	{
+		outError = "No depots found in product info";
+		return false;
+	}
+	return true;
+}
+
+bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::string& branch,
+	uint64_t manifestId, std::string& outError)
+{
+	if (!m_signedIn)
+	{
+		outError = "Sign in to Steam first (QR or account login). Depot keys require game ownership.";
+		return false;
+	}
+	if (m_anonymous)
+	{
+		outError = "Anonymous login cannot decrypt owned depots. Use QR or username/password login.";
+		return false;
+	}
+	if (!EnsureLicenses(outError))
+		return false;
+
+	const SteamDepotContext_t previous = m_ctx;
+	m_ctx.appId = appId;
+	m_ctx.depotId = depotId;
+	m_ctx.keyAppId = appId;
+	m_ctx.branch = branch.empty() ? "public" : branch;
+	m_ctx.manifestId = 0;
+	m_impl->hasDepotKey = false;
+	if (m_impl->decCtx)
+	{
+		tek_sc_sp_dec_ctx_destroy(m_impl->decCtx);
+		m_impl->decCtx = nullptr;
+	}
+
+	uint64_t resolvedManifest = manifestId;
+	uint32_t depotFromApp = 0;
+
+	BinaryVdfNode root;
+	const bool haveProductInfo = FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, appId, root, outError);
+	if (!haveProductInfo && resolvedManifest == 0)
+	{
+		m_ctx = previous;
+		return false;
+	}
+
+	if (haveProductInfo)
+	{
+		const BinaryVdfNode* depots = root.FindChildRecursive("depots");
+		const BinaryVdfNode* depotNode = depots ? depots->FindChild(std::to_string(depotId)) : nullptr;
+		if (depotNode)
+		{
+			depotFromApp = static_cast<uint32_t>(depotNode->GetUInt64("depotfromapp"));
+			if (depotFromApp != 0)
+				m_ctx.keyAppId = depotFromApp;
+
+			if (resolvedManifest == 0)
+			{
+				resolvedManifest = ManifestIdFromDepotNode(*depotNode, m_ctx.branch);
+				if (resolvedManifest == 0 && depotFromApp != 0 && depotFromApp != appId)
+				{
+					BinaryVdfNode parentRoot;
+					std::string parentError;
+					if (FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, depotFromApp, parentRoot, parentError))
 					{
-						auto branchChild = manifests->second->childs.find(m_ctx.branch);
-						if (branchChild == manifests->second->childs.end())
-							branchChild = manifests->second->childs.find("public");
-						if (branchChild != manifests->second->childs.end() && branchChild->second)
-						{
-							auto gid = branchChild->second->attribs.find("gid");
-							if (gid != branchChild->second->attribs.end())
-								resolvedManifest = std::strtoull(gid->second.c_str(), nullptr, 10);
-						}
+						const BinaryVdfNode* parentDepots = parentRoot.FindChildRecursive("depots");
+						const BinaryVdfNode* parentDepot = parentDepots
+							? parentDepots->FindChild(std::to_string(depotId))
+							: nullptr;
+						if (parentDepot)
+							resolvedManifest = ManifestIdFromDepotNode(*parentDepot, m_ctx.branch);
 					}
 				}
 			}
 		}
-	}
-	catch (const std::exception& ex)
-	{
-		outError = std::string("Failed to parse Steam product info VDF: ") + ex.what();
-		return false;
+		else if (resolvedManifest == 0)
+		{
+			outError = "Depot " + std::to_string(depotId) + " not found in app product info";
+			m_ctx = previous;
+			return false;
+		}
 	}
 
 	if (resolvedManifest == 0)
 	{
-		outError = "Could not resolve latest manifest ID for the selected depot/branch; enter a manifest ID manually";
+		outError = "Could not resolve manifest ID for depot/branch; enter a manifest ID manually";
+		m_ctx = previous;
 		return false;
 	}
 
 	m_ctx.manifestId = resolvedManifest;
-	return EnsureManifest(outError);
+	if (!EnsureManifest(outError))
+	{
+		m_ctx = previous;
+		return false;
+	}
+
+	return true;
 }
 
 bool CSteamClient::ListManifestFiles(std::vector<SteamDepotFile_t>& outFiles, std::string& outError)
