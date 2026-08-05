@@ -1230,29 +1230,46 @@ bool CSteamClient::GetOverlappingChunks(const std::string& depotPath, uint64_t o
 	}
 
 	const tek_sc_dm_file* dmFile = it->second;
-	if (!dmFile->chunks || dmFile->num_chunks <= 0)
-	{
-		outError = "File has no SteamPipe chunks in manifest: " + file.depotPath
-			+ " (size=" + std::to_string(dmFile->size) + " flags=" + std::to_string(dmFile->flags) + ")";
-		return false;
-	}
-
 	const uint64_t end = offset + size;
 	outChunks.clear();
 
-	for (int i = 0; i < dmFile->num_chunks; ++i)
-	{
-		const tek_sc_dm_chunk& chunk = dmFile->chunks[i];
-		const uint64_t chunkEnd = static_cast<uint64_t>(chunk.offset) + static_cast<uint64_t>(chunk.size);
-		if (chunkEnd <= offset || static_cast<uint64_t>(chunk.offset) >= end)
-			continue;
+	// Prefer the file's own chunk slice when present; also scan the manifest-wide
+	// array by parent pointer (more robust if slice metadata is odd).
+	auto consider = [&](const tek_sc_dm_chunk& chunk)
+		{
+			if (chunk.parent != dmFile)
+				return;
+			const uint64_t chunkEnd = static_cast<uint64_t>(chunk.offset) + static_cast<uint64_t>(chunk.size);
+			if (chunkEnd <= offset || static_cast<uint64_t>(chunk.offset) >= end)
+				return;
 
-		SteamChunkRef_t ref;
-		ref.sha1Hex = Sha1ToHex(chunk.sha.bytes);
-		ref.offset = chunk.offset;
-		ref.size = chunk.size;
-		ref.compSize = chunk.comp_size;
-		outChunks.emplace_back(std::move(ref));
+			SteamChunkRef_t ref;
+			ref.sha1Hex = Sha1ToHex(chunk.sha.bytes);
+			ref.offset = chunk.offset;
+			ref.size = chunk.size;
+			ref.compSize = chunk.comp_size;
+			outChunks.emplace_back(std::move(ref));
+		};
+
+	if (dmFile->chunks && dmFile->num_chunks > 0)
+	{
+		for (int i = 0; i < dmFile->num_chunks; ++i)
+			consider(dmFile->chunks[i]);
+	}
+
+	if (outChunks.empty() && m_impl->manifest.chunks && m_impl->manifest.num_chunks > 0)
+	{
+		for (int i = 0; i < m_impl->manifest.num_chunks; ++i)
+			consider(m_impl->manifest.chunks[i]);
+	}
+
+	if (outChunks.empty())
+	{
+		outError = "No overlapping SteamPipe chunks for " + file.depotPath
+			+ " (file num_chunks=" + std::to_string(dmFile->num_chunks)
+			+ " size=" + std::to_string(dmFile->size)
+			+ " sizeof(chunk)=" + std::to_string(sizeof(tek_sc_dm_chunk)) + ")";
+		return false;
 	}
 
 	return true;

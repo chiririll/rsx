@@ -40,7 +40,7 @@ struct SteamWindowState_t
 	std::string qrEncodedUrl;
 	std::unique_ptr<qrcodegen::QrCode> qrCode;
 
-	char appId[32]{ "1237970" }; // Titanfall 2 default; user can change
+	char appId[32]{ "1172470" }; // Apex Legends default; user can change
 	char depotId[32]{};
 	char branch[64]{ "public" };
 	char manifestId[64]{}; // empty = latest for branch
