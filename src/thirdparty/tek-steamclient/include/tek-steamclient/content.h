@@ -86,15 +86,16 @@ typedef union tek_sc_sha1_hash tek_sc_sha1_hash;
 union tek_sc_sha1_hash {
 #if !defined(_MSC_VER)
   /// uint128 + uint32 representation, optimized for comparisons.
+  /// GCC/Clang: __uint128_t forces align 16 → union size 32.
   __extension__ struct {
     __uint128_t low128;
     uint32_t high32;
   };
-#endif
-  /// 20 bytes representation, for string conversions.
-  /// On MSVC this is the sole member so the union stays exactly 20 bytes
-  /// (matching the MinGW-built DLL layout of the bytes view).
   unsigned char bytes[20];
+#else
+  // Match MinGW DLL layout: align 16, size 32. Only the first 20 bytes are SHA-1.
+  alignas(16) unsigned char bytes[32];
+#endif
 };
 
 //===-- Depot manifest types ----------------------------------------------===//
