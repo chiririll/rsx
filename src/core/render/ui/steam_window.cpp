@@ -12,6 +12,7 @@
 #include <core/steam/steamclient.h>
 #include <core/steam/steamcache.h>
 #include <core/steam/steam_load.h>
+#include <core/steam/steam_depot_util.h>
 #include <core/filehandling/load.h>
 
 struct SteamWindowState_t
@@ -78,49 +79,6 @@ static void ApplyDepotSelection(int index)
 		snprintf(s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId), "%llu",
 			static_cast<unsigned long long>(info.branchManifestId));
 	}
-}
-
-static int PickPreferredDepotIndex(const std::vector<SteamDepotInfo_t>& depots)
-{
-	auto isWindows = [](const SteamDepotInfo_t& d) -> bool
-		{
-			if (d.oslist.empty())
-				return true;
-			std::string lower = d.oslist;
-			std::transform(lower.begin(), lower.end(), lower.begin(),
-				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-			return lower.find("windows") != std::string::npos || lower.find("win32") != std::string::npos;
-		};
-
-	int best = -1;
-	int bestScore = -1;
-	for (int i = 0; i < static_cast<int>(depots.size()); ++i)
-	{
-		const SteamDepotInfo_t& d = depots[static_cast<size_t>(i)];
-		int score = 0;
-		if (d.branchManifestId != 0)
-			score += 10;
-		if (isWindows(d))
-			score += 5;
-		if (d.depotFromApp == 0)
-			score += 2;
-
-		std::string name = d.name;
-		std::transform(name.begin(), name.end(), name.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		if (name.find("content") != std::string::npos)
-			score += 3;
-		if (name.find("audio") != std::string::npos || name.find("video") != std::string::npos
-			|| name.find("soundtrack") != std::string::npos)
-			score -= 4;
-
-		if (score > bestScore)
-		{
-			bestScore = score;
-			best = i;
-		}
-	}
-	return best;
 }
 
 static void TryRestoreSessionAsync()

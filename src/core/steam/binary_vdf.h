@@ -1,5 +1,10 @@
 #pragma once
 
+#include <cstdint>
+#include <string>
+#include <string_view>
+#include <vector>
+
 // Minimal Steam binary KeyValues reader (SteamKit / Source style).
 // Type 0 + name = nested object, type 8 = end of children.
 struct BinaryVdfNode

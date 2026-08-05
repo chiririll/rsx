@@ -32,6 +32,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Build
         run: msbuild /p:Configuration=${{ env.BUILD_PROFILE }}
+      - name: Unit tests
+        run: .\bin\${{ env.BUILD_PROFILE }}\rsx_tests.exe
       - name: Extract Short Commit Hash
         id: extract
         shell: bash

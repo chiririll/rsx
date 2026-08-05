@@ -1,5 +1,8 @@
-#include <pch.h>
 #include <core/steam/binary_vdf.h>
+
+#include <cstddef>
+#include <cstdlib>
+#include <cstring>
 
 namespace
 {
