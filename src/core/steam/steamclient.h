@@ -14,6 +14,8 @@ struct SteamDepotContext_t
 {
 	uint32_t appId = 0;
 	uint32_t depotId = 0;
+	// App ID used for GetDepotDecryptionKey (may differ when depotfromapp is set).
+	uint32_t keyAppId = 0;
 	uint64_t manifestId = 0;
 	std::string branch = "public";
 };
@@ -24,6 +26,15 @@ struct SteamChunkRef_t
 	int64_t offset = 0;
 	int size = 0;
 	int compSize = 0;
+};
+
+struct SteamDepotInfo_t
+{
+	uint32_t depotId = 0;
+	std::string name;
+	uint64_t branchManifestId = 0; // manifest for the requested branch (usually public)
+	uint32_t depotFromApp = 0; // shared depot parent app, if any
+	std::string oslist;
 };
 
 // Thin C++ wrapper around tek-steamclient CM + SteamPipe APIs.
@@ -45,6 +56,8 @@ public:
 
 	bool IsConnected() const { return m_connected; }
 	bool IsSignedIn() const { return m_signedIn; }
+	bool IsAnonymous() const { return m_anonymous; }
+	const std::string& GetUsername() const { return m_username; }
 
 	// Full login. If a remembered token exists and rememberLogin is true, tries token first.
 	bool Login(const std::string& username, const std::string& password, bool rememberLogin,
@@ -59,14 +72,23 @@ public:
 	bool LoginAnonymous(std::string& outError);
 	bool LoginWithToken(const std::string& token, std::string& outError);
 
+	// Connect + sign in using the remembered refresh token (no UI). Tries renew on failure.
+	bool TryRestoreSession(std::string& outError);
+
 	void Logout();
 
 	bool HasRememberedToken() const;
 	std::string GetRememberedUsername() const;
 
+	// List depots (+ branch manifests) from PICS product info for an app.
+	bool QueryAppDepots(uint32_t appId, const std::string& branch,
+		std::vector<SteamDepotInfo_t>& outDepots, std::string& outError);
+
 	// Pin a depot + explicit manifest. Manifest ID 0 means "latest for branch".
+	// Requires an authenticated (non-anonymous) session for depot keys.
 	bool SetDepotContext(uint32_t appId, uint32_t depotId, const std::string& branch,
 		uint64_t manifestId, std::string& outError);
+	void ClearDepotContext();
 	const SteamDepotContext_t& GetDepotContext() const { return m_ctx; }
 	bool HasDepotContext() const { return m_ctx.appId != 0 && m_ctx.depotId != 0 && m_ctx.manifestId != 0; }
 
@@ -95,6 +117,7 @@ private:
 	struct Impl;
 
 	bool EnsureConnected(std::string& outError);
+	bool EnsureLicenses(std::string& outError);
 	bool EnsureManifest(std::string& outError);
 	bool EnsureDepotKey(std::string& outError);
 	bool EnsureServers(std::string& outError);
@@ -115,6 +138,7 @@ private:
 
 	bool m_connected = false;
 	bool m_signedIn = false;
+	bool m_anonymous = false;
 	std::string m_username;
 };
 
