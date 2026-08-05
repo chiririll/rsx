@@ -92,5 +92,20 @@ Write-UECDNFile "UnrealEngine-25887585" "9ce4a076844fff6f758111f2d38b6dbabbc2ece
 $OUT_PATH = Join-Path $projectDir "\thirdparty\radaudio\radaudio_decoder_win64.lib"
 Write-UECDNFile "UnrealEngine-40594131" "3578368bc5d11cd2e80c63f7063c2828954c1562" $OUT_PATH 1693906 330314 2024220 "F7089A7A48B304CB54D00EB2BB75FD56A30923550BA4B74BAAE6FD7697BD1807"
 
+# tek-steamclient Windows DLL (vendored headers/lib are committed; DLL is fetched).
+$tekDll = Join-Path $projectDir "thirdparty\tek-steamclient\libtek-steamclient-2.dll"
+if (-not (Test-Path $tekDll)) {
+    $tekZip = Join-Path $env:TEMP "tek-steamclient-2.1.5-win-x86_64.zip"
+    $tekExtract = Join-Path $env:TEMP "tek-steamclient-rsx-extract"
+    try {
+        Invoke-WebRequest -Uri "https://github.com/teknology-hub/tek-steamclient/releases/download/v2.1.5/tek-steamclient-2.1.5-win-x86_64.zip" -OutFile $tekZip
+        if (Test-Path $tekExtract) { Remove-Item $tekExtract -Recurse -Force }
+        Expand-Archive -Path $tekZip -DestinationPath $tekExtract -Force
+        Copy-Item (Join-Path $tekExtract "libtek-steamclient-2.dll") $tekDll -Force
+    }
+    catch {
+        Write-VSParsableErrorAndExit "Failed to download tek-steamclient DLL; $_" 7
+    }
+}
 
 exit 0
