@@ -951,6 +951,20 @@ bool CSteamClient::EnsureManifest(std::string& outError)
 	if (m_impl->manifest.num_dirs > 0)
 		BuildFileIndex(&m_impl->manifest.dirs[0], {}, m_impl->fileIndex, m_impl->basenameIndex);
 
+	if (m_impl->manifest.num_chunks <= 0)
+	{
+		outError = "Depot manifest has no SteamPipe chunks (corrupt cache?). Clear Steam cache and pin again.";
+		tek_sc_dm_free(&m_impl->manifest);
+		m_impl->hasManifest = false;
+		m_impl->fileIndex.clear();
+		m_impl->basenameIndex.clear();
+		return false;
+	}
+
+	Log("STEAM: Manifest %llu — %d files, %d chunks\n",
+		static_cast<unsigned long long>(m_ctx.manifestId),
+		m_impl->manifest.num_files, m_impl->manifest.num_chunks);
+
 	if (!m_impl->decCtx)
 		m_impl->decCtx = tek_sc_sp_dec_ctx_create(m_impl->depotKey);
 
@@ -1216,6 +1230,13 @@ bool CSteamClient::GetOverlappingChunks(const std::string& depotPath, uint64_t o
 	}
 
 	const tek_sc_dm_file* dmFile = it->second;
+	if (!dmFile->chunks || dmFile->num_chunks <= 0)
+	{
+		outError = "File has no SteamPipe chunks in manifest: " + file.depotPath
+			+ " (size=" + std::to_string(dmFile->size) + " flags=" + std::to_string(dmFile->flags) + ")";
+		return false;
+	}
+
 	const uint64_t end = offset + size;
 	outChunks.clear();
 
@@ -1341,11 +1362,25 @@ bool CSteamClient::DownloadAndDecodeChunk(const SteamChunkRef_t& chunk, std::vec
 bool CSteamClient::ReadFileRange(const std::string& depotPath, uint64_t offset, uint64_t size,
 	std::vector<char>& out, std::string& outError)
 {
+	if (size == 0)
+	{
+		out.clear();
+		return true;
+	}
+
 	std::vector<SteamChunkRef_t> chunks;
 	if (!GetOverlappingChunks(depotPath, offset, size, chunks, outError))
 		return false;
 
+	if (chunks.empty())
+	{
+		outError = "Manifest lists no SteamPipe chunks for " + depotPath
+			+ " (size " + std::to_string(size) + "). Re-pin the depot / clear Steam cache.";
+		return false;
+	}
+
 	out.assign(static_cast<size_t>(size), '\0');
+	std::vector<char> covered(static_cast<size_t>(size), 0);
 	for (const SteamChunkRef_t& chunk : chunks)
 	{
 		std::vector<char> decoded;
@@ -1361,7 +1396,19 @@ bool CSteamClient::ReadFileRange(const std::string& depotPath, uint64_t offset, 
 		const size_t dstOff = static_cast<size_t>(copyStart - offset);
 		const size_t srcOff = static_cast<size_t>(copyStart - chunkStart);
 		const size_t copySize = static_cast<size_t>(copyEnd - copyStart);
+		if (srcOff + copySize > decoded.size())
+		{
+			outError = "Decoded chunk shorter than manifest size for " + chunk.sha1Hex;
+			return false;
+		}
 		memcpy(out.data() + dstOff, decoded.data() + srcOff, copySize);
+		memset(covered.data() + dstOff, 1, copySize);
+	}
+
+	if (std::find(covered.begin(), covered.end(), 0) != covered.end())
+	{
+		outError = "Incomplete SteamPipe coverage for " + depotPath;
+		return false;
 	}
 
 	return true;
@@ -1372,6 +1419,18 @@ bool CSteamClient::DownloadFile(const std::string& depotPath, std::vector<char>&
 	SteamDepotFile_t file{};
 	if (!FindManifestFile(depotPath, file, outError))
 		return false;
+
+	if (!EnsureManifest(outError))
+		return false;
+
+	const auto it = m_impl->fileIndex.find(file.depotPath);
+	if (it != m_impl->fileIndex.end() && it->second
+		&& (it->second->flags & TEK_SC_DM_FILE_FLAG_symlink) && it->second->target_path)
+	{
+		const std::string target = NormalizeDepotPath(WideToUtf8(it->second->target_path));
+		return ReadFileRange(target, 0, static_cast<uint64_t>(file.size), out, outError);
+	}
+
 	return ReadFileRange(file.depotPath, 0, static_cast<uint64_t>(file.size), out, outError);
 }
 

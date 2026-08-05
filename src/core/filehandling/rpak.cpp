@@ -52,12 +52,10 @@ void HandlePakLoad(std::vector<std::string> filePaths)
                 }
                 else
                 {
-                    g_assetData.Log_Error(g_assetData.m_pakPatchMaster, "Failed to load patch_master.rpak\n");
-
-                    assertm(false, "Parsing patch_master from file failed.");
+                    // Optional companion file — missing/corrupt patch_master must not abort the load.
+                    g_assetData.Log_Error(g_assetData.m_pakPatchMaster, "Failed to load patch_master.rpak; continuing without patches\n");
                     delete g_assetData.m_pakPatchMaster;
                     g_assetData.m_pakPatchMaster = nullptr;
-
                 }
             }
         }

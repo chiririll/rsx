@@ -89,15 +89,45 @@ bool SteamDownloadRpaksForLoad(
 			toDownload.insert(best);
 	}
 
+	auto isPlausibleRpak = [](const std::filesystem::path& path) -> bool
+		{
+			std::error_code ec;
+			if (!std::filesystem::exists(path, ec) || std::filesystem::file_size(path, ec) < 8)
+				return false;
+
+			StreamIO file;
+			if (!file.open(path.string(), eStreamIOMode::Read))
+				return false;
+
+			char magic[4]{};
+			file.read(magic, 4);
+			return magic[0] == 'R' && magic[1] == 'P' && magic[2] == 'a' && magic[3] == 'k';
+		};
+
 	outLocalPaths.clear();
 	for (const std::string& depotPath : toDownload)
 	{
 		const std::filesystem::path dest = root / std::filesystem::path(depotPath);
 		std::error_code ec;
-		if (!std::filesystem::exists(dest, ec) || std::filesystem::file_size(dest, ec) == 0)
+		const bool needsDownload = !std::filesystem::exists(dest, ec)
+			|| std::filesystem::file_size(dest, ec) == 0
+			|| (depotPath.ends_with(".rpak") && !isPlausibleRpak(dest));
+
+		if (needsDownload)
 		{
+			if (std::filesystem::exists(dest, ec))
+				std::filesystem::remove(dest, ec);
+
 			if (!g_steamClient.DownloadFileToPath(depotPath, dest, outError))
 				return false;
+
+			if (depotPath.ends_with(".rpak") && !isPlausibleRpak(dest))
+			{
+				std::filesystem::remove(dest, ec);
+				outError = "Downloaded " + depotPath + " is not a valid RPak (missing RPak magic). "
+					"Clear Steam cache and re-pin the depot.";
+				return false;
+			}
 		}
 
 		// Only return user-selected (or their resolved patch) paths to the loader,

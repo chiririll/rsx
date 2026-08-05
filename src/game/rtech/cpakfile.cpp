@@ -71,9 +71,11 @@ const bool CPakFile::ParseFileBuffer(const std::string& path, bool* alreadyLoade
     // Pre-parse the header to make sure that we don't waste time decompressing data needlessly
 
     std::shared_ptr<char[]> headerBuf;
-    FileSystem::ReadFileData(GetFilePath().string(), &headerBuf, 0x80); // 0x80 bytes is the max rpak header size
+    if (!FileSystem::ReadFileData(GetFilePath().string(), &headerBuf, 0x80) || !headerBuf) // 0x80 bytes is the max rpak header size
+        return false;
 
-    ParsePakFileHeader(headerBuf.get());
+    if (!ParsePakFileHeader(headerBuf.get()) || !header())
+        return false;
 
     // Block loading of effects.rpak and effects(01).rpak from R5Reloaded.
     // These files are very strange and cause some problems, so to allow for bulk processing of R5Reloaded's pak files,
@@ -92,7 +94,8 @@ const bool CPakFile::ParseFileBuffer(const std::string& path, bool* alreadyLoade
         return false;
 
     // parse our initial header (subject to change)
-    ParsePakFileHeader(m_Buf.get());
+    if (!ParsePakFileHeader(m_Buf.get()) || !header())
+        return false;
 
     switch (header()->version)
     {
@@ -133,6 +136,9 @@ const bool CPakFile::ParseFileBuffer(const std::string& path, bool* alreadyLoade
 
 const bool CPakFile::ParsePakFileHeader(const char* buf)
 {
+    if (!buf)
+        return false;
+
     // pak should be definitely valid by now
     const short version = reinterpret_cast<const short*>(buf)[2];
 
@@ -141,9 +147,15 @@ const bool CPakFile::ParsePakFileHeader(const char* buf)
 
 const bool CPakFile::ParsePakFileHeader(const char* buf, const short version)
 {
+    if (!buf)
+        return false;
+
     // cleanup the old header (if there is one)
     if (nullptr != m_pHeader)
+    {
         delete m_pHeader;
+        m_pHeader = nullptr;
+    }
 
     switch (version)
     {
