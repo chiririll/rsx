@@ -230,3 +230,56 @@ bool BuildDepotList(uint32_t appId, const std::string& branch, const ProductInfo
 	}
 	return true;
 }
+
+bool BuildBranchList(uint32_t appId, const ProductInfoProvider& provider,
+	std::vector<SteamBranchInfo_t>& outBranches, std::string& outError)
+{
+	if (!provider)
+	{
+		outError = "No product info provider";
+		return false;
+	}
+
+	BinaryVdfNode root;
+	if (!provider(appId, root, outError))
+		return false;
+
+	const BinaryVdfNode* depots = root.FindChildRecursive("depots");
+	const BinaryVdfNode* branches = depots ? depots->FindChild("branches") : nullptr;
+	if (!branches)
+	{
+		outBranches.clear();
+		return true;
+	}
+
+	outBranches.clear();
+	outBranches.reserve(branches->children.size());
+	for (const BinaryVdfNode& child : branches->children)
+	{
+		if (child.name.empty())
+			continue;
+
+		SteamBranchInfo_t info;
+		info.name = child.name;
+		info.description = child.GetString("description");
+		info.buildId = child.GetUInt64("buildid");
+		if (info.buildId == 0 && child.hasInt)
+			info.buildId = child.intValue;
+
+		const std::string pwd = child.GetString("pwdrequired");
+		info.passwordRequired = pwd == "1" || child.GetUInt64("pwdrequired") != 0;
+
+		outBranches.emplace_back(std::move(info));
+	}
+
+	std::sort(outBranches.begin(), outBranches.end(), [](const SteamBranchInfo_t& a, const SteamBranchInfo_t& b)
+		{
+			const bool aPublic = a.name == "public";
+			const bool bPublic = b.name == "public";
+			if (aPublic != bPublic)
+				return aPublic;
+			return a.name < b.name;
+		});
+
+	return true;
+}

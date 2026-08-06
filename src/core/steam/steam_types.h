@@ -35,3 +35,11 @@ struct SteamDepotInfo_t
 	uint32_t depotFromApp = 0; // shared depot parent app, if any
 	std::string oslist;
 };
+
+struct SteamBranchInfo_t
+{
+	std::string name;
+	std::string description;
+	uint64_t buildId = 0;
+	bool passwordRequired = false;
+};

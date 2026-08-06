@@ -15,10 +15,31 @@
 #include <core/steam/steam_depot_util.h>
 #include <core/filehandling/load.h>
 
+enum class SteamWizardStep : int
+{
+	Auth = 0,
+	GameDepot,
+	ManifestFiles,
+};
+
+enum class SteamGamePreset : int
+{
+	Apex = 0,
+	Titanfall2,
+	Custom,
+};
+
+enum class SteamManifestMode : int
+{
+	Latest = 0,
+	Custom,
+};
+
 struct SteamWindowState_t
 {
 	bool open = false;
 	bool restoreAttempted = false;
+	SteamWizardStep step = SteamWizardStep::Auth;
 
 	char username[128]{};
 	char password[128]{};
@@ -40,13 +61,18 @@ struct SteamWindowState_t
 	std::string qrEncodedUrl;
 	std::unique_ptr<qrcodegen::QrCode> qrCode;
 
-	char appId[32]{ "1172470" }; // Apex Legends default; user can change
+	SteamGamePreset gamePreset = SteamGamePreset::Apex;
+	char appId[32]{ "1172470" };
 	char depotId[32]{};
 	char branch[64]{ "public" };
-	char manifestId[64]{}; // empty = latest for branch
+	char manifestId[64]{}; // used when ManifestMode::Custom; empty Latest = 0
+
+	SteamManifestMode manifestMode = SteamManifestMode::Latest;
 
 	std::vector<SteamDepotInfo_t> depotInfos;
+	std::vector<SteamBranchInfo_t> branchInfos;
 	int selectedDepotIndex = -1;
+	int selectedBranchIndex = -1;
 
 	// Touched from worker threads and the UI frame — always take listMutex.
 	std::mutex listMutex;
@@ -60,10 +86,32 @@ struct SteamWindowState_t
 
 static SteamWindowState_t s_steamUi;
 
+static constexpr const char* kWizardStepLabels[] = {
+	"A · Auth",
+	"B · Game / Depot",
+	"C · Manifest / Files",
+};
+
 static void SteamStatus(const std::string& msg)
 {
 	s_steamUi.status = msg;
 	Log("STEAM: %s\n", msg.c_str());
+}
+
+static void ApplyGamePreset(SteamGamePreset preset)
+{
+	s_steamUi.gamePreset = preset;
+	switch (preset)
+	{
+	case SteamGamePreset::Apex:
+		strncpy_s(s_steamUi.appId, "1172470", _TRUNCATE);
+		break;
+	case SteamGamePreset::Titanfall2:
+		strncpy_s(s_steamUi.appId, "1237970", _TRUNCATE);
+		break;
+	case SteamGamePreset::Custom:
+		break;
+	}
 }
 
 static void ApplyDepotSelection(int index)
@@ -74,17 +122,56 @@ static void ApplyDepotSelection(int index)
 	const SteamDepotInfo_t& info = s_steamUi.depotInfos[static_cast<size_t>(index)];
 	s_steamUi.selectedDepotIndex = index;
 	snprintf(s_steamUi.depotId, IM_ARRAYSIZE(s_steamUi.depotId), "%u", info.depotId);
-	if (info.branchManifestId != 0)
+}
+
+static void ApplyBranchSelection(int index)
+{
+	if (index < 0 || index >= static_cast<int>(s_steamUi.branchInfos.size()))
+		return;
+
+	s_steamUi.selectedBranchIndex = index;
+	strncpy_s(s_steamUi.branch, s_steamUi.branchInfos[static_cast<size_t>(index)].name.c_str(), _TRUNCATE);
+}
+
+static void ClearFileState()
+{
 	{
-		snprintf(s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId), "%llu",
-			static_cast<unsigned long long>(info.branchManifestId));
+		std::lock_guard lock(s_steamUi.listMutex);
+		s_steamUi.rpakFiles.clear();
+		s_steamUi.selected.clear();
+	}
+	g_steamClient.ClearDepotContext();
+}
+
+static void ClearDepotAndFileState(bool clearBranches = true)
+{
+	s_steamUi.depotInfos.clear();
+	s_steamUi.selectedDepotIndex = -1;
+	s_steamUi.depotId[0] = '\0';
+	if (clearBranches)
+	{
+		s_steamUi.branchInfos.clear();
+		s_steamUi.selectedBranchIndex = -1;
+	}
+	ClearFileState();
+}
+
+static void AdvanceToGameDepotIfSignedIn()
+{
+	if (g_steamClient.IsSignedIn() && s_steamUi.step == SteamWizardStep::Auth
+		&& !s_steamUi.awaitingGuard && !s_steamUi.qrActive)
+	{
+		s_steamUi.step = SteamWizardStep::GameDepot;
 	}
 }
 
 static void TryRestoreSessionAsync()
 {
 	if (s_steamUi.restoreAttempted || s_steamUi.busy || g_steamClient.IsSignedIn())
+	{
+		AdvanceToGameDepotIfSignedIn();
 		return;
+	}
 
 	if (!g_steamClient.HasRememberedToken())
 	{
@@ -108,6 +195,7 @@ static void TryRestoreSessionAsync()
 				const std::string user = g_steamClient.GetRememberedUsername();
 				if (!user.empty())
 					strncpy_s(s_steamUi.username, user.c_str(), _TRUNCATE);
+				s_steamUi.step = SteamWizardStep::GameDepot;
 			}
 			else
 			{
@@ -126,6 +214,12 @@ void OpenSteamLoadWindow()
 		if (!remembered.empty())
 			strncpy_s(s_steamUi.username, remembered.c_str(), _TRUNCATE);
 	}
+
+	if (g_steamClient.IsSignedIn())
+		s_steamUi.step = SteamWizardStep::GameDepot;
+	else
+		s_steamUi.step = SteamWizardStep::Auth;
+
 	TryRestoreSessionAsync();
 }
 
@@ -240,29 +334,43 @@ static void StartQrLogin()
 				const std::string user = g_steamClient.GetRememberedUsername();
 				if (!user.empty())
 					strncpy_s(s_steamUi.username, user.c_str(), _TRUNCATE);
+				s_steamUi.step = SteamWizardStep::GameDepot;
 			}
 			s_steamUi.busy = false;
 		}).detach();
 }
 
-static void DrawSteamLoadWindow()
+static void DrawWizardHeader()
 {
-	if (!s_steamUi.open)
-		return;
+	ImGui::TextUnformatted("Load from Steam");
+	ImGui::Spacing();
 
-	ImGui::SetNextWindowSize(ImVec2(720, 560), ImGuiCond_FirstUseEver);
-	if (!ImGui::Begin("Load from Steam", &s_steamUi.open))
+	for (int i = 0; i < 3; ++i)
 	{
-		ImGui::End();
-		return;
+		if (i > 0)
+		{
+			ImGui::SameLine();
+			ImGui::TextDisabled(" > ");
+			ImGui::SameLine();
+		}
+
+		const bool current = static_cast<int>(s_steamUi.step) == i;
+		const bool done = static_cast<int>(s_steamUi.step) > i;
+		if (current)
+			ImGui::TextColored(ImVec4(0.55f, 0.85f, 1.f, 1.f), "%s", kWizardStepLabels[i]);
+		else if (done)
+			ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.f), "%s", kWizardStepLabels[i]);
+		else
+			ImGui::TextDisabled("%s", kWizardStepLabels[i]);
 	}
 
-	const bool busy = s_steamUi.busy;
-	const bool qrActive = s_steamUi.qrActive;
+	ImGui::Separator();
+}
 
+static void DrawStageAuth(bool busy, bool qrActive)
+{
 	ImGui::BeginDisabled(busy && !qrActive);
 
-	ImGui::SeparatorText("Account");
 	if (g_steamClient.IsSignedIn())
 	{
 		if (g_steamClient.IsAnonymous())
@@ -276,6 +384,14 @@ static void DrawSteamLoadWindow()
 				? std::string("Signed in")
 				: ("Signed in as " + g_steamClient.GetUsername());
 			ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.f), "%s", signedInLabel.c_str());
+		}
+
+		if (!qrActive && !s_steamUi.awaitingGuard && ImGui::Button("Logout"))
+		{
+			g_steamClient.Logout();
+			ClearDepotAndFileState();
+			s_steamUi.step = SteamWizardStep::Auth;
+			SteamStatus("Logged out");
 		}
 	}
 	else
@@ -337,12 +453,15 @@ static void DrawSteamLoadWindow()
 				if (!ok)
 					SteamStatus("Login failed: " + error);
 				else
+				{
 					SteamStatus("Logged in");
+					s_steamUi.step = SteamWizardStep::GameDepot;
+				}
 				s_steamUi.busy = false;
 			}).detach();
 	}
 
-	if (!qrActive)
+	if (!qrActive && !s_steamUi.awaitingGuard)
 	{
 		ImGui::SameLine();
 		if (ImGui::Button("Login with QR"))
@@ -358,7 +477,10 @@ static void DrawSteamLoadWindow()
 					if (!g_steamClient.LoginAnonymous(error))
 						SteamStatus("Anonymous login failed: " + error);
 					else
+					{
 						SteamStatus("Logged in anonymously (owned depots will not decrypt)");
+						s_steamUi.step = SteamWizardStep::GameDepot;
+					}
 					s_steamUi.busy = false;
 				}).detach();
 		}
@@ -387,90 +509,114 @@ static void DrawSteamLoadWindow()
 		if (ImGui::Button("Cancel QR login"))
 			s_steamUi.qrCancel.store(true);
 	}
+}
 
+static void QueryDepotsAsync()
+{
+	s_steamUi.busy = true;
+	SteamStatus("Querying app depots...");
+	CThread([]()
+		{
+			std::string error;
+			const uint32_t appId = static_cast<uint32_t>(strtoul(s_steamUi.appId, nullptr, 10));
+			std::vector<SteamDepotInfo_t> depots;
+			std::vector<SteamBranchInfo_t> branches;
+			if (!g_steamClient.QueryAppDepotsAndBranches(appId, s_steamUi.branch, depots, branches, error))
+			{
+				SteamStatus("Query depots failed: " + error);
+				s_steamUi.busy = false;
+				return;
+			}
+
+			s_steamUi.depotInfos = std::move(depots);
+			s_steamUi.branchInfos = std::move(branches);
+
+			const int preferred = PickPreferredDepotIndex(s_steamUi.depotInfos);
+			ApplyDepotSelection(preferred >= 0 ? preferred : 0);
+
+			s_steamUi.selectedBranchIndex = -1;
+			for (int i = 0; i < static_cast<int>(s_steamUi.branchInfos.size()); ++i)
+			{
+				if (s_steamUi.branchInfos[static_cast<size_t>(i)].name == s_steamUi.branch)
+				{
+					s_steamUi.selectedBranchIndex = i;
+					break;
+				}
+			}
+
+			SteamStatus(std::format("Found {} depots; selected depot {}",
+				s_steamUi.depotInfos.size(),
+				s_steamUi.depotId[0] ? s_steamUi.depotId : "?"));
+			s_steamUi.busy = false;
+		}).detach();
+}
+
+static void DrawStageGameDepot(bool busy)
+{
 	ImGui::BeginDisabled(busy);
 
-	ImGui::SeparatorText("Depot");
-	ImGui::InputText("App ID", s_steamUi.appId, IM_ARRAYSIZE(s_steamUi.appId));
-	ImGui::InputText("Depot ID", s_steamUi.depotId, IM_ARRAYSIZE(s_steamUi.depotId));
-	ImGui::InputText("Branch", s_steamUi.branch, IM_ARRAYSIZE(s_steamUi.branch));
-	ImGui::InputText("Manifest ID (empty = latest)", s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId));
-
-	if (ImGui::Button("Query depots"))
+	if (g_steamClient.IsSignedIn())
 	{
-		s_steamUi.busy = true;
-		SteamStatus("Querying app depots...");
-		CThread([]()
-			{
-				std::string error;
-				const uint32_t appId = static_cast<uint32_t>(strtoul(s_steamUi.appId, nullptr, 10));
-				std::vector<SteamDepotInfo_t> depots;
-				if (!g_steamClient.QueryAppDepots(appId, s_steamUi.branch, depots, error))
-				{
-					SteamStatus("Query depots failed: " + error);
-					s_steamUi.busy = false;
-					return;
-				}
+		if (g_steamClient.IsAnonymous())
+		{
+			ImGui::TextColored(ImVec4(1.f, 0.75f, 0.3f, 1.f),
+				"Anonymous session — depot query requires a real Steam login.");
+		}
+		else
+		{
+			const std::string signedInLabel = g_steamClient.GetUsername().empty()
+				? std::string("Signed in")
+				: ("Signed in as " + g_steamClient.GetUsername());
+			ImGui::TextColored(ImVec4(0.45f, 0.9f, 0.45f, 1.f), "%s", signedInLabel.c_str());
+		}
 
-				s_steamUi.depotInfos = std::move(depots);
-				const int preferred = PickPreferredDepotIndex(s_steamUi.depotInfos);
-				ApplyDepotSelection(preferred >= 0 ? preferred : 0);
-				SteamStatus(std::format("Found {} depots; selected depot {}",
-					s_steamUi.depotInfos.size(),
-					s_steamUi.depotId[0] ? s_steamUi.depotId : "?"));
-				s_steamUi.busy = false;
-			}).detach();
+		ImGui::SameLine();
+		if (ImGui::SmallButton("Logout"))
+		{
+			g_steamClient.Logout();
+			ClearDepotAndFileState();
+			s_steamUi.step = SteamWizardStep::Auth;
+			SteamStatus("Logged out");
+		}
 	}
 
-	ImGui::SameLine();
-	if (ImGui::Button("Pin depot / load manifest"))
+	ImGui::SeparatorText("Game");
+
+	int preset = static_cast<int>(s_steamUi.gamePreset);
+	if (ImGui::RadioButton("Apex Legends", &preset, static_cast<int>(SteamGamePreset::Apex)))
 	{
-		s_steamUi.busy = true;
-		SteamStatus("Resolving depot manifest...");
-		CThread([]()
-			{
-				std::string error;
-				const uint32_t appId = static_cast<uint32_t>(strtoul(s_steamUi.appId, nullptr, 10));
-				const uint32_t depotId = static_cast<uint32_t>(strtoul(s_steamUi.depotId, nullptr, 10));
-				const uint64_t manifestId = s_steamUi.manifestId[0] ? strtoull(s_steamUi.manifestId, nullptr, 10) : 0ull;
+		ApplyGamePreset(SteamGamePreset::Apex);
+		ClearDepotAndFileState();
+	}
+	ImGui::SameLine();
+	if (ImGui::RadioButton("Titanfall 2", &preset, static_cast<int>(SteamGamePreset::Titanfall2)))
+	{
+		ApplyGamePreset(SteamGamePreset::Titanfall2);
+		ClearDepotAndFileState();
+	}
+	ImGui::SameLine();
+	if (ImGui::RadioButton("Custom App ID", &preset, static_cast<int>(SteamGamePreset::Custom)))
+	{
+		ApplyGamePreset(SteamGamePreset::Custom);
+		ClearDepotAndFileState();
+	}
 
-				if (!g_steamClient.SetDepotContext(appId, depotId, s_steamUi.branch, manifestId, error))
-				{
-					SteamStatus("Failed to pin depot: " + error);
-					s_steamUi.busy = false;
-					return;
-				}
+	if (s_steamUi.gamePreset == SteamGamePreset::Custom)
+		ImGui::InputText("App ID", s_steamUi.appId, IM_ARRAYSIZE(s_steamUi.appId));
+	else
+		ImGui::Text("App ID: %s", s_steamUi.appId);
 
-				std::vector<SteamDepotFile_t> files;
-				if (!g_steamClient.ListManifestFiles(files, error))
-				{
-					SteamStatus("Failed to list manifest: " + error);
-					s_steamUi.busy = false;
-					return;
-				}
+	ImGui::SeparatorText("Depot");
 
-				std::vector<SteamDepotFile_t> rpaks;
-				for (const auto& file : files)
-				{
-					if (file.depotPath.ends_with(".rpak"))
-						rpaks.push_back(file);
-				}
-				std::vector<bool> sel(rpaks.size(), false);
-				const size_t rpakCount = rpaks.size();
-
-				{
-					std::lock_guard lock(s_steamUi.listMutex);
-					s_steamUi.rpakFiles.swap(rpaks);
-					s_steamUi.selected.swap(sel);
-				}
-
-				const auto& ctx = g_steamClient.GetDepotContext();
-				snprintf(s_steamUi.depotId, IM_ARRAYSIZE(s_steamUi.depotId), "%u", ctx.depotId);
-				snprintf(s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId), "%llu",
-					static_cast<unsigned long long>(ctx.manifestId));
-				SteamStatus(std::format("Pinned depot {} manifest {} ({} rpaks)", ctx.depotId, ctx.manifestId, rpakCount));
-				s_steamUi.busy = false;
-			}).detach();
+	const bool canQuery = g_steamClient.IsSignedIn() && !g_steamClient.IsAnonymous();
+	ImGui::BeginDisabled(!canQuery);
+	if (ImGui::Button("Query depots"))
+		QueryDepotsAsync();
+	ImGui::EndDisabled();
+	if (!canQuery)
+	{
+		ImGui::SameLine();
+		ImGui::TextDisabled("(sign in with account or QR)");
 	}
 
 	if (!s_steamUi.depotInfos.empty())
@@ -483,7 +629,7 @@ static void DrawSteamLoadWindow()
 					: s_steamUi.depotInfos[static_cast<size_t>(s_steamUi.selectedDepotIndex)].name)
 			: "Select depot";
 
-		if (ImGui::BeginCombo("Depot list", preview.c_str()))
+		if (ImGui::BeginCombo("Depot", preview.c_str()))
 		{
 			for (int i = 0; i < static_cast<int>(s_steamUi.depotInfos.size()); ++i)
 			{
@@ -495,22 +641,172 @@ static void DrawSteamLoadWindow()
 					info.branchManifestId,
 					info.oslist.empty() ? "-" : info.oslist);
 				if (ImGui::Selectable(label.c_str(), selected))
+				{
+					if (i != s_steamUi.selectedDepotIndex)
+						ClearFileState();
 					ApplyDepotSelection(i);
+				}
 				if (selected)
 					ImGui::SetItemDefaultFocus();
 			}
 			ImGui::EndCombo();
 		}
+
+		if (s_steamUi.selectedDepotIndex >= 0
+			&& s_steamUi.selectedDepotIndex < static_cast<int>(s_steamUi.depotInfos.size()))
+		{
+			const SteamDepotInfo_t& info = s_steamUi.depotInfos[static_cast<size_t>(s_steamUi.selectedDepotIndex)];
+			std::string detail = std::format("Depot {} — {} | OS: {} | Branch manifest: {}",
+				info.depotId,
+				info.name.empty() ? "unnamed" : info.name,
+				info.oslist.empty() ? "-" : info.oslist,
+				info.branchManifestId);
+			if (info.depotFromApp != 0)
+				detail += std::format(" | shared from app {}", info.depotFromApp);
+			ImGui::TextWrapped("%s", detail.c_str());
+		}
 	}
+	else
+	{
+		ImGui::TextDisabled("No depots loaded yet.");
+	}
+
+	if (ImGui::CollapsingHeader("Advanced: branch"))
+	{
+		ImGui::TextWrapped("Usually leave this on public. Non-public branches may require a password Steam does not expose here.");
+
+		if (!s_steamUi.branchInfos.empty())
+		{
+			std::string branchPreview = s_steamUi.selectedBranchIndex >= 0
+				? s_steamUi.branchInfos[static_cast<size_t>(s_steamUi.selectedBranchIndex)].name
+				: (s_steamUi.branch[0] ? s_steamUi.branch : "public");
+
+			if (ImGui::BeginCombo("Branch list", branchPreview.c_str()))
+			{
+				for (int i = 0; i < static_cast<int>(s_steamUi.branchInfos.size()); ++i)
+				{
+					const SteamBranchInfo_t& info = s_steamUi.branchInfos[static_cast<size_t>(i)];
+					const bool selected = i == s_steamUi.selectedBranchIndex;
+					const std::string label = std::format("{}{}  build={}{}",
+						info.name,
+						info.passwordRequired ? " [pwd]" : "",
+						info.buildId,
+						info.description.empty() ? "" : ("  " + info.description));
+					if (ImGui::Selectable(label.c_str(), selected))
+					{
+						ApplyBranchSelection(i);
+						ClearDepotAndFileState(false); // keep branch list; re-query depots for new branch
+					}
+					if (selected)
+						ImGui::SetItemDefaultFocus();
+				}
+				ImGui::EndCombo();
+			}
+		}
+
+		if (ImGui::InputText("Branch", s_steamUi.branch, IM_ARRAYSIZE(s_steamUi.branch)))
+			s_steamUi.selectedBranchIndex = -1;
+	}
+
+	ImGui::EndDisabled();
+}
+
+static void PinManifestAsync()
+{
+	s_steamUi.busy = true;
+	SteamStatus("Resolving depot manifest...");
+	CThread([]()
+		{
+			std::string error;
+			const uint32_t appId = static_cast<uint32_t>(strtoul(s_steamUi.appId, nullptr, 10));
+			const uint32_t depotId = static_cast<uint32_t>(strtoul(s_steamUi.depotId, nullptr, 10));
+			const uint64_t manifestId = (s_steamUi.manifestMode == SteamManifestMode::Custom && s_steamUi.manifestId[0])
+				? strtoull(s_steamUi.manifestId, nullptr, 10)
+				: 0ull;
+
+			if (!g_steamClient.SetDepotContext(appId, depotId, s_steamUi.branch, manifestId, error))
+			{
+				SteamStatus("Failed to pin depot: " + error);
+				s_steamUi.busy = false;
+				return;
+			}
+
+			std::vector<SteamDepotFile_t> files;
+			if (!g_steamClient.ListManifestFiles(files, error))
+			{
+				SteamStatus("Failed to list manifest: " + error);
+				s_steamUi.busy = false;
+				return;
+			}
+
+			std::vector<SteamDepotFile_t> rpaks;
+			for (const auto& file : files)
+			{
+				if (file.depotPath.ends_with(".rpak"))
+					rpaks.push_back(file);
+			}
+			std::vector<bool> sel(rpaks.size(), false);
+			const size_t rpakCount = rpaks.size();
+
+			{
+				std::lock_guard lock(s_steamUi.listMutex);
+				s_steamUi.rpakFiles.swap(rpaks);
+				s_steamUi.selected.swap(sel);
+			}
+
+			const auto& ctx = g_steamClient.GetDepotContext();
+			snprintf(s_steamUi.depotId, IM_ARRAYSIZE(s_steamUi.depotId), "%u", ctx.depotId);
+			snprintf(s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId), "%llu",
+				static_cast<unsigned long long>(ctx.manifestId));
+			SteamStatus(std::format("Pinned depot {} manifest {} ({} rpaks)", ctx.depotId, ctx.manifestId, rpakCount));
+			s_steamUi.busy = false;
+		}).detach();
+}
+
+static void DrawStageManifestFiles(bool busy)
+{
+	ImGui::BeginDisabled(busy);
+
+	ImGui::Text("App %s · Depot %s · Branch %s",
+		s_steamUi.appId[0] ? s_steamUi.appId : "?",
+		s_steamUi.depotId[0] ? s_steamUi.depotId : "?",
+		s_steamUi.branch[0] ? s_steamUi.branch : "public");
+
+	ImGui::SeparatorText("Manifest");
+
+	int mode = static_cast<int>(s_steamUi.manifestMode);
+	if (ImGui::RadioButton("Latest for branch", &mode, static_cast<int>(SteamManifestMode::Latest)))
+		s_steamUi.manifestMode = SteamManifestMode::Latest;
+	ImGui::SameLine();
+	if (ImGui::RadioButton("Custom ID", &mode, static_cast<int>(SteamManifestMode::Custom)))
+		s_steamUi.manifestMode = SteamManifestMode::Custom;
+
+	if (s_steamUi.manifestMode == SteamManifestMode::Custom)
+		ImGui::InputText("Manifest ID", s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId));
+	else if (g_steamClient.HasDepotContext())
+	{
+		const auto& ctx = g_steamClient.GetDepotContext();
+		ImGui::TextDisabled("Resolved manifest: %llu", static_cast<unsigned long long>(ctx.manifestId));
+	}
+	else
+	{
+		ImGui::TextDisabled("Will resolve the latest manifest for the selected branch.");
+	}
+
+	if (ImGui::Button("Load manifest"))
+		PinManifestAsync();
 
 	ImGui::SeparatorText("RPak files");
 	ImGui::InputText("Filter", s_steamUi.filter, IM_ARRAYSIZE(s_steamUi.filter));
 
-	if (ImGui::BeginChild("rpak_list", ImVec2(0, -60), ImGuiChildFlags_Borders))
+	if (ImGui::BeginChild("rpak_list", ImVec2(0, -70), ImGuiChildFlags_Borders))
 	{
 		std::lock_guard lock(s_steamUi.listMutex);
 		if (s_steamUi.selected.size() != s_steamUi.rpakFiles.size())
 			s_steamUi.selected.assign(s_steamUi.rpakFiles.size(), false);
+
+		if (s_steamUi.rpakFiles.empty())
+			ImGui::TextDisabled("Load a manifest to list rpak files.");
 
 		for (size_t i = 0; i < s_steamUi.rpakFiles.size(); ++i)
 		{
@@ -582,7 +878,82 @@ static void DrawSteamLoadWindow()
 	}
 
 	ImGui::EndDisabled();
+}
 
+static void DrawWizardFooter(bool busy)
+{
+	const bool guardOrQr = s_steamUi.awaitingGuard || s_steamUi.qrActive;
+	ImGui::BeginDisabled(busy || guardOrQr);
+
+	const bool canBack = s_steamUi.step != SteamWizardStep::Auth;
+	const bool canNext = (s_steamUi.step == SteamWizardStep::Auth && g_steamClient.IsSignedIn())
+		|| (s_steamUi.step == SteamWizardStep::GameDepot
+			&& s_steamUi.depotId[0] != '\0'
+			&& g_steamClient.IsSignedIn()
+			&& !g_steamClient.IsAnonymous());
+
+	if (canBack)
+	{
+		if (ImGui::Button("Back"))
+		{
+			if (s_steamUi.step == SteamWizardStep::ManifestFiles)
+				s_steamUi.step = SteamWizardStep::GameDepot;
+			else if (s_steamUi.step == SteamWizardStep::GameDepot)
+				s_steamUi.step = SteamWizardStep::Auth;
+		}
+		ImGui::SameLine();
+	}
+
+	if (s_steamUi.step != SteamWizardStep::ManifestFiles)
+	{
+		ImGui::BeginDisabled(!canNext);
+		if (ImGui::Button("Next"))
+		{
+			if (s_steamUi.step == SteamWizardStep::Auth)
+				s_steamUi.step = SteamWizardStep::GameDepot;
+			else if (s_steamUi.step == SteamWizardStep::GameDepot)
+				s_steamUi.step = SteamWizardStep::ManifestFiles;
+		}
+		ImGui::EndDisabled();
+	}
+
+	ImGui::EndDisabled();
+}
+
+static void DrawSteamLoadWindow()
+{
+	if (!s_steamUi.open)
+		return;
+
+	ImGui::SetNextWindowSize(ImVec2(760, 620), ImGuiCond_FirstUseEver);
+	if (!ImGui::Begin("Load from Steam", &s_steamUi.open))
+	{
+		ImGui::End();
+		return;
+	}
+
+	const bool busy = s_steamUi.busy;
+	const bool qrActive = s_steamUi.qrActive;
+
+	DrawWizardHeader();
+
+	switch (s_steamUi.step)
+	{
+	case SteamWizardStep::Auth:
+		DrawStageAuth(busy, qrActive);
+		break;
+	case SteamWizardStep::GameDepot:
+		DrawStageGameDepot(busy);
+		break;
+	case SteamWizardStep::ManifestFiles:
+		DrawStageManifestFiles(busy);
+		break;
+	}
+
+	ImGui::Spacing();
+	DrawWizardFooter(busy);
+
+	ImGui::Separator();
 	if (!s_steamUi.status.empty())
 		ImGui::TextWrapped("%s", s_steamUi.status.c_str());
 
