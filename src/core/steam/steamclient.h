@@ -53,6 +53,11 @@ public:
 	bool QueryAppDepots(uint32_t appId, const std::string& branch,
 		std::vector<SteamDepotInfo_t>& outDepots, std::string& outError);
 
+	// Same as QueryAppDepots, also fills branch names from depots/branches (one product-info fetch).
+	bool QueryAppDepotsAndBranches(uint32_t appId, const std::string& branch,
+		std::vector<SteamDepotInfo_t>& outDepots, std::vector<SteamBranchInfo_t>& outBranches,
+		std::string& outError);
+
 	// Pin a depot + explicit manifest. Manifest ID 0 means "latest for branch".
 	// Requires an authenticated (non-anonymous) session for depot keys.
 	bool SetDepotContext(uint32_t appId, uint32_t depotId, const std::string& branch,

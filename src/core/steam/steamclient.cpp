@@ -1086,6 +1086,14 @@ namespace
 bool CSteamClient::QueryAppDepots(uint32_t appId, const std::string& branch,
 	std::vector<SteamDepotInfo_t>& outDepots, std::string& outError)
 {
+	std::vector<SteamBranchInfo_t> unusedBranches;
+	return QueryAppDepotsAndBranches(appId, branch, outDepots, unusedBranches, outError);
+}
+
+bool CSteamClient::QueryAppDepotsAndBranches(uint32_t appId, const std::string& branch,
+	std::vector<SteamDepotInfo_t>& outDepots, std::vector<SteamBranchInfo_t>& outBranches,
+	std::string& outError)
+{
 	if (!m_signedIn)
 	{
 		outError = "Sign in to Steam first (QR or account login)";
@@ -1099,11 +1107,27 @@ bool CSteamClient::QueryAppDepots(uint32_t appId, const std::string& branch,
 	if (!EnsureLicenses(outError))
 		return false;
 
-	const ProductInfoProvider provider = [this](uint32_t id, BinaryVdfNode& root, std::string& err) -> bool
+	BinaryVdfNode primaryRoot;
+	if (!FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, appId, primaryRoot, outError))
+		return false;
+
+	const ProductInfoProvider provider = [this, appId, &primaryRoot](uint32_t id, BinaryVdfNode& root, std::string& err) -> bool
 		{
+			if (id == appId)
+			{
+				root = primaryRoot;
+				return true;
+			}
 			return FetchProductInfoTree(m_impl->cm, m_impl->lib, m_impl->waiter, id, root, err);
 		};
-	return BuildDepotList(appId, branch, provider, outDepots, outError);
+
+	if (!BuildDepotList(appId, branch, provider, outDepots, outError))
+		return false;
+
+	std::string branchError;
+	if (!BuildBranchList(appId, provider, outBranches, branchError))
+		outBranches.clear(); // optional UI metadata
+	return true;
 }
 
 bool CSteamClient::SetDepotContext(uint32_t appId, uint32_t depotId, const std::string& branch,

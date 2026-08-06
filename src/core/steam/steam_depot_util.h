@@ -26,3 +26,6 @@ bool ResolveDepotTarget(uint32_t appId, uint32_t depotId, const std::string& bra
 
 bool BuildDepotList(uint32_t appId, const std::string& branch, const ProductInfoProvider& provider,
 	std::vector<SteamDepotInfo_t>& outDepots, std::string& outError);
+
+bool BuildBranchList(uint32_t appId, const ProductInfoProvider& provider,
+	std::vector<SteamBranchInfo_t>& outBranches, std::string& outError);

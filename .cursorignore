@@ -361,6 +361,7 @@ rsx_cache_db.bin
 
 # Misc
 *.json
+!seasons.json
 !vcpkg*.json
 radaudio.lib
 binka_ue_decode_*.lib

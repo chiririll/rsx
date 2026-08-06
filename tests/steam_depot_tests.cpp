@@ -210,4 +210,38 @@ TEST_SUITE("steam_depot_util")
 		CHECK_FALSE(BuildDepotList(1u, "public", provider, depots, err));
 		CHECK(err.find("No depots") != std::string::npos);
 	}
+
+	TEST_CASE("BuildBranchList reads names descriptions and puts public first")
+	{
+		BinaryVdfBuilder tree;
+		tree.BeginObject("appinfo");
+		tree.BeginObject("depots");
+		tree.BeginObject("10");
+		tree.AddString("name", "content");
+		tree.EndObject();
+		tree.BeginObject("branches");
+		tree.BeginObject("beta");
+		tree.AddUInt64("buildid", 200ull);
+		tree.AddString("description", "beta branch");
+		tree.AddString("pwdrequired", "1");
+		tree.EndObject();
+		tree.BeginObject("public");
+		tree.AddUInt64("buildid", 100ull);
+		tree.EndObject();
+		tree.EndObject();
+		tree.EndObject();
+		tree.EndObject();
+
+		auto provider = MakeMapProvider({ { 1u, std::move(tree) } });
+		std::vector<SteamBranchInfo_t> branches;
+		std::string err;
+		REQUIRE(BuildBranchList(1u, provider, branches, err));
+		REQUIRE(branches.size() == 2);
+		CHECK(branches[0].name == "public");
+		CHECK(branches[0].buildId == 100ull);
+		CHECK(branches[1].name == "beta");
+		CHECK(branches[1].description == "beta branch");
+		CHECK(branches[1].passwordRequired);
+		CHECK(branches[1].buildId == 200ull);
+	}
 }
