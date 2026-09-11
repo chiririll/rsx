@@ -71,7 +71,17 @@ public:
         Play();
     }
 
-    bool IsAudioFinished() const { return audioCursor == _numSamples * _sampleSize; };
+    void SeekToFrame(size_t frame)
+    {
+        // can't use the numsamples/numchannels vars until device has been initialised
+        if (!deviceInitialised)
+            return;
+
+        // clamp target frame so we dont end up after the end of the audio stream!
+        audioCursor = std::min(frame * _numChannels * _sampleSize, _audioData.size());
+    }
+
+    bool IsAudioFinished() const { return _audioData.empty() || audioCursor >= _audioData.size(); };
 
     bool IsPlaying() const { return isPlaying; }
     size_t GetCursor() const { return audioCursor; };

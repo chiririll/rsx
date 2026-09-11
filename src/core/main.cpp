@@ -25,6 +25,7 @@
 #include <game/asset.h>
 #include <core/logging/logger.h>
 #include "bridge/bridge.h"
+#include <implot/implot.h>
 
 #pragma warning(push, 0)
 #pragma warning( disable: 4127 )
@@ -101,6 +102,7 @@ static void RegisterAssetTypeBindings(const CCommandLine* const cli)
     
     // audio
     extern void InitAudioSourceAssetType();
+    extern void InitAudioEventAssetType();
 
     // bluepoint
     extern void InitBluepointWrappedFileAssetType();
@@ -172,6 +174,7 @@ static void RegisterAssetTypeBindings(const CCommandLine* const cli)
 
     // audio
     InitAudioSourceAssetType();
+    InitAudioEventAssetType();
 
     // bluepoint
     InitBluepointWrappedFileAssetType();
@@ -322,6 +325,7 @@ int main(int argc, char* argv[])
         UpdateWindow(windowHandle);
 
         ImGui::CreateContext();
+        ImPlot::CreateContext();
         g_pImGuiHandler->SetStyle();
         g_pImGuiHandler->SetupHandler();
 
@@ -369,6 +373,7 @@ int main(int argc, char* argv[])
     {
         ImGui_ImplDX11_Shutdown();
         ImGui_ImplWin32_Shutdown();
+        ImPlot::DestroyContext();
         ImGui::DestroyContext();
     }
 

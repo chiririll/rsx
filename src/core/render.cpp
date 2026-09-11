@@ -26,6 +26,7 @@
 #include <core/utils/gamefinder.h>
 #include <core/render/ui/steam_window.h>
 #include <misc/ImGuiNotify.hpp>
+#include <imgui/implot/implot.h>
 
 extern CDXParentHandler* g_dxHandler;
 extern std::atomic<uint32_t> g_maxConcurrentThreadCount;
@@ -852,6 +853,7 @@ void HandleRenderFrame()
                 .Window("Scene", true)
                 .DockLeft(0.25f)
                     .Window("Asset List")
+                    .Window("File Info")
                     .Done()
                 .DockRight(0.25f)
                     .Window("Asset Info");
@@ -874,6 +876,7 @@ void HandleRenderFrame()
 
 #if defined(DEBUG_IMGUI_DEMO)
     ImGui::ShowDemoWindow();
+    ImPlot::ShowDemoWindow(nullptr);
 #endif
 
     MainWnd_MenuBar();
@@ -884,6 +887,7 @@ void HandleRenderFrame()
 
     const bool shouldPopulateAssetWindows = !inJobAction && !g_assetData.v_assetContainers.empty();
 
+    // dude why did i do this to myself
     if (!SHOW_WELCOME_BOX && ImGui::Begin("Asset List", nullptr, ImGuiWindowFlags_MenuBar) && shouldPopulateAssetWindows)
     {
         std::vector<CGlobalAssetData::AssetLookup_t>& pakAssets = FilterConfig->textFilter.IsActive() ? s_filteredAssets : g_assetData.v_assets;
@@ -984,6 +988,8 @@ void HandleRenderFrame()
                         // so that they know the asset will not work correctly
                         if(knownAssetType && !typeBinding->second._loadAssetType)
                             ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(1.0f, 0.f, 0.f, 1.f));
+                        else if(asset->GetExportedStatus())
+                            ImGui::PushStyleColor(ImGuiCol_Text, ImVec4(0.f, 1.f, 1.f, 1.f));
 
                         if (ImGui::Selectable(asset->GetAssetName().c_str(), isSelected, ImGuiSelectableFlags_AllowDoubleClick))
                         {
@@ -1000,8 +1006,9 @@ void HandleRenderFrame()
                                 s_selectedAssets.clear();
                             }
                         }
-                        if (knownAssetType && !typeBinding->second._loadAssetType)
+                        if ((knownAssetType && !typeBinding->second._loadAssetType) || asset->GetExportedStatus())
                             ImGui::PopStyleColor();
+
 
                         // Context menu (right-click)
                         if (ImGui::BeginPopupContextItem())
@@ -1062,6 +1069,48 @@ void HandleRenderFrame()
             ApplySelectionRequests(ms_io, s_selectedAssets, pakAssets);
 
             ImGui::EndTable();
+        }
+    }
+    if (!SHOW_WELCOME_BOX) ImGui::End();
+
+    if (!SHOW_WELCOME_BOX && ImGui::Begin("File Info", nullptr) && shouldPopulateAssetWindows)
+    {
+        static size_t selectedFileIndex = UINT64_MAX;
+        static std::string selectedFileName = "(none)";
+
+        if (g_assetData.v_assetContainers.size() > 1)
+        {
+            if (ImGui::BeginCombo("File", selectedFileName.c_str()))
+            {
+                size_t i = 0;
+                for (auto& it : g_assetData.v_assetContainers)
+                {
+                    const std::string filePath = it->GetFilePath().filename().string();
+                    if (ImGui::Selectable(filePath.c_str(), selectedFileIndex == i))
+                    {
+                        selectedFileName = filePath;
+                        selectedFileIndex = i;
+                    }
+
+                    i++;
+                }
+
+                ImGui::EndCombo();
+            }
+        }
+        else
+        {
+            selectedFileIndex = 0;
+            selectedFileName = g_assetData.v_assetContainers.at(selectedFileIndex)->GetFilePath().filename().string();
+        }
+
+        if (selectedFileIndex != UINT64_MAX && selectedFileIndex < g_assetData.v_assetContainers.size())
+        {
+            ImGui::PushFont(NULL, 16.f);
+            ImGui::TextDisabled("Selected: %s", selectedFileName.c_str());
+            ImGui::PopFont();
+
+            g_assetData.v_assetContainers.at(selectedFileIndex)->ContainerPreviewUI();
         }
     }
     if (!SHOW_WELCOME_BOX) ImGui::End();

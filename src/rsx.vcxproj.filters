@@ -109,6 +109,15 @@
     <Filter Include="game\vpk">
       <UniqueIdentifier>{20e17b08-8fd9-421f-8a16-9e0992bf2f76}</UniqueIdentifier>
     </Filter>
+    <Filter Include="thirdparty\imgui\implot">
+      <UniqueIdentifier>{08453191-7974-4350-970f-8bf25cf445bf}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="thirdparty\rad_lzb_simple">
+      <UniqueIdentifier>{7b07f2e4-0912-4cd1-a512-7f407ac5a295}</UniqueIdentifier>
+    </Filter>
+    <Filter Include="core\bridge">
+      <UniqueIdentifier>{ed944e90-b9d0-4ab5-9ee8-2c9e6dddf993}</UniqueIdentifier>
+    </Filter>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="pch.h">
@@ -492,11 +501,29 @@
     <ClInclude Include="thirdparty\imgui\misc\ImGuiNotify.hpp">
       <Filter>thirdparty\imgui\misc</Filter>
     </ClInclude>
-    <ClInclude Include="core\bridge\bridge.h">
-      <Filter>core\bridge</Filter>
-    </ClInclude>
     <ClInclude Include="game\vpk\vpk.h">
       <Filter>game\vpk</Filter>
+    </ClInclude>
+    <ClInclude Include="game\audio\source.h">
+      <Filter>game\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="game\audio\event.h">
+      <Filter>game\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\imgui\implot\implot_internal.h">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\imgui\implot\implot.h">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClInclude>
+    <ClInclude Include="game\audio\project.h">
+      <Filter>game\audio</Filter>
+    </ClInclude>
+    <ClInclude Include="thirdparty\rad_lzb_simple\rad_lzb_simple.h">
+      <Filter>thirdparty\rad_lzb_simple</Filter>
+    </ClInclude>
+    <ClInclude Include="core\bridge\bridge.h">
+      <Filter>core\bridge</Filter>
     </ClInclude>
   </ItemGroup>
   <ItemGroup>
@@ -830,14 +857,38 @@
     <ClCompile Include="core\render\preview\texpreview.cpp">
       <Filter>core\render\preview</Filter>
     </ClCompile>
-    <ClCompile Include="core\bridge\bridge.cpp">
-      <Filter>core\bridge</Filter>
-    </ClCompile>
     <ClCompile Include="game\vpk\vpk.cpp">
       <Filter>game\vpk</Filter>
     </ClCompile>
     <ClCompile Include="core\filehandling\valvepak.cpp">
       <Filter>core\filehandling</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\source.cpp">
+      <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\event.cpp">
+      <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\event_action.cpp">
+      <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\implot\implot.cpp">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\implot\implot_items.cpp">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\imgui\implot\implot_demo.cpp">
+      <Filter>thirdparty\imgui\implot</Filter>
+    </ClCompile>
+    <ClCompile Include="game\audio\project.cpp">
+      <Filter>game\audio</Filter>
+    </ClCompile>
+    <ClCompile Include="thirdparty\rad_lzb_simple\rad_lzb_simple.c">
+      <Filter>thirdparty\rad_lzb_simple</Filter>
+    </ClCompile>
+    <ClCompile Include="core\bridge\bridge.cpp">
+      <Filter>core\bridge</Filter>
     </ClCompile>
   </ItemGroup>
   <ItemGroup>

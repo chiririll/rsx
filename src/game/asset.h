@@ -158,7 +158,7 @@ static std::map<AssetType_t, Color4> s_AssetTypeColours =
 
 	// audio
 	{ AssetType_t::ASRC, Color4(91,  52, 252) },
-	{ AssetType_t::AEVT, Color4(91,  52, 252) },
+	{ AssetType_t::AEVT, Color4(255,  52, 252) },
 
 	// bluepoint
 	// bpwf
@@ -449,6 +449,7 @@ public:
 	virtual ~CAssetContainer() {};
 
 	virtual const ContainerType GetContainerType() const = 0;
+	virtual void ContainerPreviewUI() const = 0;
 
 	void SetFilePath(const std::filesystem::path& filePath)
 	{
@@ -483,9 +484,15 @@ struct AssetTypeBinding_t
 	const char* name;
 	uint32_t type;
 	uint32_t headerAlignment;
-	AssetLoadFunc_t loadFunc;       // void  (*AssetLoadFunc_t)(CAssetContainer* container, CAsset* asset);
-	AssetLoadFunc_t postLoadFunc;   // void  (*AssetLoadFunc_t)(CAssetContainer* container, CAsset* asset);
-	AssetPreviewFunc_t previewFunc; // void* (*AssetPreviewFunc_t)(CAsset* const asset, const bool firstFrameForAsset);
+
+	// void  (*AssetLoadFunc_t)(CAssetContainer* container, CAsset* asset);
+	AssetLoadFunc_t loadFunc;
+
+	// void  (*AssetLoadFunc_t)(CAssetContainer* container, CAsset* asset);
+	AssetLoadFunc_t postLoadFunc;
+
+	// void* (*AssetPreviewFunc_t)(CAsset* const asset, const bool firstFrameForAsset);
+	AssetPreviewFunc_t previewFunc;
 
 	struct
 	{
