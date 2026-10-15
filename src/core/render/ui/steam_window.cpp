@@ -770,6 +770,25 @@ struct FileTreeNode_t
 	std::vector<std::pair<std::string, size_t>> files; // name, index into rpakFiles/selected
 };
 
+static std::string FormatFileSize(int64_t bytes)
+{
+	static constexpr const char* units[] = { "B", "KB", "MB", "GB" };
+	double value = static_cast<double>(bytes);
+	size_t unit = 0;
+	while (value >= 1024.0 && unit < IM_ARRAYSIZE(units) - 1)
+	{
+		value /= 1024.0;
+		++unit;
+	}
+
+	char buf[32];
+	if (unit == 0)
+		snprintf(buf, sizeof(buf), "%lld B", static_cast<long long>(bytes));
+	else
+		snprintf(buf, sizeof(buf), "%.1f %s", value, units[unit]);
+	return buf;
+}
+
 // Caller must hold listMutex. forceOpen expands every directory (used while filtering).
 static void DrawFileTree(const FileTreeNode_t& node, bool forceOpen)
 {
@@ -791,6 +810,8 @@ static void DrawFileTree(const FileTreeNode_t& node, bool forceOpen)
 		ImGui::PushID(static_cast<int>(index));
 		if (ImGui::Checkbox(name.c_str(), &selected))
 			s_steamUi.selected[index] = selected;
+		ImGui::SameLine();
+		ImGui::TextDisabled("%s", FormatFileSize(s_steamUi.rpakFiles[index].size).c_str());
 		ImGui::PopID();
 	}
 }
@@ -895,10 +916,14 @@ static void DrawStageManifestFiles(bool busy)
 					std::vector<std::string> localPaths;
 					std::string error;
 					std::atomic<uint32_t> progress = 0;
-					const ProgressBarEvent_t* bar = g_pImGuiHandler->AddProgressBarEvent("Steam download..",
-						static_cast<uint32_t>(paths.size()), &progress, true);
+					// Progress is counted in chunks; the bar is created once the total is known.
+					const ProgressBarEvent_t* bar = nullptr;
 
-					const bool ok = SteamDownloadRpaksForLoad(paths, localPaths, error, &progress);
+					const bool ok = SteamDownloadRpaksForLoad(paths, localPaths, error, &progress,
+						[&bar, &progress](uint32_t totalChunks)
+						{
+							bar = g_pImGuiHandler->AddProgressBarEvent("Steam download..", totalChunks, &progress, true);
+						});
 					g_pImGuiHandler->FinishProgressBarEvent(bar);
 
 					if (!ok)

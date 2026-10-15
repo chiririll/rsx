@@ -13,4 +13,7 @@ bool SteamDownloadRpaksForLoad(
 	const std::vector<std::string>& depotRpakPaths,
 	std::vector<std::string>& outLocalPaths,
 	std::string& outError,
-	std::atomic<uint32_t>* progressCounter = nullptr);
+	std::atomic<uint32_t>* progressCounter = nullptr,
+	const std::function<void(uint32_t)>& onTotalChunks = nullptr);
+// progressCounter counts downloaded chunks; onTotalChunks is called once, before the first
+// download, with the number of chunks that will be fetched (0 if everything is cached).

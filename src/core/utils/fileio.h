@@ -7,6 +7,10 @@ enum class eStreamIOMode : uint8_t
     Write
 };
 
+// Defined in core/steam/steam_stream.cpp. Returns a streambuf serving a Steam depot file
+// on demand when `path` is a not-yet-downloaded file in the Steam cache, otherwise nullptr.
+std::unique_ptr<std::streambuf> SteamOpenVirtualFile(const std::filesystem::path& path);
+
 class StreamIO
 {
 public:
@@ -49,13 +53,19 @@ public:
         {
             currentMode = mode;
             // check if we had a previously opened file to close it
+            detachVirtualReader();
             if (reader.is_open())
                 reader.close();
 
             reader.open(path.c_str(), std::ios::binary);
             if (!reader.is_open())
             {
-                currentMode = eStreamIOMode::None;
+                // not on disk: it may be a Steam depot file we can stream on demand
+                virtualBuf = SteamOpenVirtualFile(path);
+                if (virtualBuf)
+                    static_cast<std::istream&>(reader).rdbuf(virtualBuf.get()); // also clears stream state
+                else
+                    currentMode = eStreamIOMode::None;
             }
         }
 
@@ -132,7 +142,7 @@ public:
         }
         else if (currentMode == eStreamIOMode::Read)
         {
-            reader.close();
+            closeReader();
         }
     }
 
@@ -157,7 +167,7 @@ public:
         // check if we hit the end of the file.
         if (reader.eof())
         {
-            reader.close();
+            closeReader();
             currentMode = eStreamIOMode::None;
             return false;
         }
@@ -342,8 +352,27 @@ public:
     }
 
 private:
+    // Puts the ifstream's own filebuf back if it was pointed at a virtual (Steam) buffer.
+    void detachVirtualReader()
+    {
+        if (!virtualBuf)
+            return;
+
+        static_cast<std::istream&>(reader).rdbuf(reader.rdbuf());
+        virtualBuf.reset();
+    }
+
+    void closeReader()
+    {
+        if (virtualBuf)
+            detachVirtualReader();
+        else
+            reader.close();
+    }
+
     std::ofstream writer;
     std::ifstream reader;
+    std::unique_ptr<std::streambuf> virtualBuf;
     std::string filePath;
     eStreamIOMode currentMode;
 };

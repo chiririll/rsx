@@ -1401,7 +1401,7 @@ bool CSteamClient::DownloadAndDecodeChunk(const SteamChunkRef_t& chunk, std::vec
 }
 
 bool CSteamClient::ReadFileRange(const std::string& depotPath, uint64_t offset, uint64_t size,
-	std::vector<char>& out, std::string& outError)
+	std::vector<char>& out, std::string& outError, std::atomic<uint32_t>* chunkProgress)
 {
 	if (size == 0)
 	{
@@ -1427,6 +1427,9 @@ bool CSteamClient::ReadFileRange(const std::string& depotPath, uint64_t offset, 
 		std::vector<char> decoded;
 		if (!DownloadAndDecodeChunk(chunk, decoded, outError))
 			return false;
+
+		if (chunkProgress)
+			++(*chunkProgress);
 
 		const uint64_t chunkStart = static_cast<uint64_t>(chunk.offset);
 		const uint64_t copyStart = (std::max)(chunkStart, offset);
@@ -1455,7 +1458,8 @@ bool CSteamClient::ReadFileRange(const std::string& depotPath, uint64_t offset, 
 	return true;
 }
 
-bool CSteamClient::DownloadFile(const std::string& depotPath, std::vector<char>& out, std::string& outError)
+bool CSteamClient::DownloadFile(const std::string& depotPath, std::vector<char>& out, std::string& outError,
+	std::atomic<uint32_t>* chunkProgress)
 {
 	SteamDepotFile_t file{};
 	if (!FindManifestFile(depotPath, file, outError))
@@ -1469,16 +1473,17 @@ bool CSteamClient::DownloadFile(const std::string& depotPath, std::vector<char>&
 		&& (it->second->flags & TEK_SC_DM_FILE_FLAG_symlink) && it->second->target_path)
 	{
 		const std::string target = NormalizeDepotPath(WideToUtf8(it->second->target_path));
-		return ReadFileRange(target, 0, static_cast<uint64_t>(file.size), out, outError);
+		return ReadFileRange(target, 0, static_cast<uint64_t>(file.size), out, outError, chunkProgress);
 	}
 
-	return ReadFileRange(file.depotPath, 0, static_cast<uint64_t>(file.size), out, outError);
+	return ReadFileRange(file.depotPath, 0, static_cast<uint64_t>(file.size), out, outError, chunkProgress);
 }
 
-bool CSteamClient::DownloadFileToPath(const std::string& depotPath, const std::filesystem::path& destPath, std::string& outError)
+bool CSteamClient::DownloadFileToPath(const std::string& depotPath, const std::filesystem::path& destPath, std::string& outError,
+	std::atomic<uint32_t>* chunkProgress)
 {
 	std::vector<char> data;
-	if (!DownloadFile(depotPath, data, outError))
+	if (!DownloadFile(depotPath, data, outError, chunkProgress))
 		return false;
 
 	std::error_code ec;

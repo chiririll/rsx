@@ -73,12 +73,15 @@ public:
 	bool FindManifestFile(const std::string& depotPathOrName, SteamDepotFile_t& outFile, std::string& outError);
 
 	// Download a byte range from a depot file (assembles overlapping chunks).
+	// chunkProgress, if given, is incremented once per chunk fetched/decoded.
 	bool ReadFileRange(const std::string& depotPath, uint64_t offset, uint64_t size,
-		std::vector<char>& out, std::string& outError);
+		std::vector<char>& out, std::string& outError, std::atomic<uint32_t>* chunkProgress = nullptr);
 
 	// Download an entire small file (rpak) into out / or to a local path.
-	bool DownloadFile(const std::string& depotPath, std::vector<char>& out, std::string& outError);
-	bool DownloadFileToPath(const std::string& depotPath, const std::filesystem::path& destPath, std::string& outError);
+	bool DownloadFile(const std::string& depotPath, std::vector<char>& out, std::string& outError,
+		std::atomic<uint32_t>* chunkProgress = nullptr);
+	bool DownloadFileToPath(const std::string& depotPath, const std::filesystem::path& destPath, std::string& outError,
+		std::atomic<uint32_t>* chunkProgress = nullptr);
 
 	// Resolve chunks overlapping [offset, offset+size).
 	bool GetOverlappingChunks(const std::string& depotPath, uint64_t offset, uint64_t size,

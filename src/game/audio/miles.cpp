@@ -7,6 +7,7 @@
 #include <miniaudio/miniaudio.h>
 
 #include <core/audio/audioplayer.h>
+#include <core/steam/steam_stream.h>
 #include <core/fonts/codicons.h>
 #include <misc/imgui_utility.h>
 
@@ -89,12 +90,19 @@ void CMilesAudioBank::DiscoverStreamingFiles()
 
 	this->m_streamStates = 0;
 
+	std::vector<std::filesystem::path> streamPaths;
 	for (auto& it : std::filesystem::directory_iterator(dirPath))
 	{
-		if (!it.is_regular_file() || it.path().extension() != ".mstr")
-			continue;
+		if (it.is_regular_file() && it.path().extension() == ".mstr")
+			streamPaths.push_back(it.path());
+	}
 
-		StreamIO stream(it.path(), eStreamIOMode::Read);
+	// Streaming files that live in Steam but haven't been downloaded; StreamIO reads them on demand.
+	SteamListVirtualFiles(dirPath, ".mstr", streamPaths);
+
+	for (const std::filesystem::path& streamPath : streamPaths)
+	{
+		StreamIO stream(streamPath, eStreamIOMode::Read);
 
 		MilesStreamHeader_t header = stream.read<MilesStreamHeader_t>();
 		stream.close();

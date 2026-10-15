@@ -33,7 +33,8 @@ bool SteamDownloadRpaksForLoad(
 	const std::vector<std::string>& depotSelectedPaths,
 	std::vector<std::string>& outLocalPaths,
 	std::string& outError,
-	std::atomic<uint32_t>* progressCounter)
+	std::atomic<uint32_t>* progressCounter,
+	const std::function<void(uint32_t)>& onTotalChunks)
 {
 	// Rpaks get patch-chain handling; everything else is downloaded as-is.
 	std::vector<std::string> depotRpakPaths;
@@ -79,6 +80,21 @@ bool SteamDownloadRpaksForLoad(
 		const std::string norm = CSteamClient::NormalizeDepotPath(path);
 		toDownload.insert(norm);
 		otherNormalized.push_back(norm);
+
+		// A Miles bank needs its project file beside it. The (huge) .mstr streaming files are
+		// deliberately NOT downloaded: they're read from Steam on demand, see steam_stream.h.
+		if (EndsWithNoCase(norm, ".mbnk"))
+		{
+			const size_t slash = norm.find_last_of('/');
+			const std::string dir = slash == std::string::npos ? std::string() : norm.substr(0, slash + 1);
+			for (const auto& file : allFiles)
+			{
+				const std::string fileNorm = CSteamClient::NormalizeDepotPath(file.depotPath);
+				if (EndsWithNoCase(fileNorm, ".mprj") && fileNorm.compare(0, dir.size(), dir) == 0
+					&& fileNorm.find('/', dir.size()) == std::string::npos)
+					toDownload.insert(file.depotPath);
+			}
+		}
 
 		// A *_dir.vpk is useless without its numbered archives (*_000.vpk, ...).
 		if (EndsWithNoCase(norm, "_dir.vpk"))
@@ -137,6 +153,10 @@ bool SteamDownloadRpaksForLoad(
 		};
 
 	outLocalPaths.clear();
+
+	// Plan first so progress can be reported in chunks: files already on disk cost nothing.
+	std::vector<std::string> pending;
+	uint32_t totalChunks = 0;
 	for (const std::string& depotPath : toDownload)
 	{
 		const std::filesystem::path dest = root / std::filesystem::path(depotPath);
@@ -144,26 +164,41 @@ bool SteamDownloadRpaksForLoad(
 		const bool needsDownload = !std::filesystem::exists(dest, ec)
 			|| std::filesystem::file_size(dest, ec) == 0
 			|| (depotPath.ends_with(".rpak") && !isPlausibleRpak(dest));
+		if (!needsDownload)
+			continue;
 
-		if (needsDownload)
+		pending.push_back(depotPath);
+
+		SteamDepotFile_t info{};
+		std::vector<SteamChunkRef_t> chunks;
+		std::string planError;
+		if (g_steamClient.FindManifestFile(depotPath, info, planError) && info.size > 0
+			&& g_steamClient.GetOverlappingChunks(depotPath, 0, static_cast<uint64_t>(info.size), chunks, planError))
+			totalChunks += static_cast<uint32_t>(chunks.size());
+		else
+			totalChunks += 1; // symlink/empty/unknown: count it so the bar still moves
+	}
+
+	if (onTotalChunks)
+		onTotalChunks(totalChunks);
+
+	for (const std::string& depotPath : pending)
+	{
+		const std::filesystem::path dest = root / std::filesystem::path(depotPath);
+		std::error_code ec;
+		if (std::filesystem::exists(dest, ec))
+			std::filesystem::remove(dest, ec);
+
+		if (!g_steamClient.DownloadFileToPath(depotPath, dest, outError, progressCounter))
+			return false;
+
+		if (depotPath.ends_with(".rpak") && !isPlausibleRpak(dest))
 		{
-			if (std::filesystem::exists(dest, ec))
-				std::filesystem::remove(dest, ec);
-
-			if (!g_steamClient.DownloadFileToPath(depotPath, dest, outError))
-				return false;
-
-			if (depotPath.ends_with(".rpak") && !isPlausibleRpak(dest))
-			{
-				std::filesystem::remove(dest, ec);
-				outError = "Downloaded " + depotPath + " is not a valid RPak (missing RPak magic). "
-					"Clear Steam cache and re-pin the depot.";
-				return false;
-			}
+			std::filesystem::remove(dest, ec);
+			outError = "Downloaded " + depotPath + " is not a valid RPak (missing RPak magic). "
+				"Clear Steam cache and re-pin the depot.";
+			return false;
 		}
-
-		if (progressCounter)
-			++(*progressCounter);
 	}
 
 	// Hand the loader one path per selected stem. Prefer the base name so
