@@ -739,10 +739,11 @@ static void PinManifestAsync()
 				return;
 			}
 
+			// Keep every loadable type; the UI filters down to rpaks when requested.
 			std::vector<SteamDepotFile_t> rpaks;
 			for (const auto& file : files)
 			{
-				if (file.depotPath.ends_with(".rpak"))
+				if (SteamIsSupportedDepotFile(file.depotPath))
 					rpaks.push_back(file);
 			}
 			std::vector<bool> sel(rpaks.size(), false);
@@ -758,9 +759,40 @@ static void PinManifestAsync()
 			snprintf(s_steamUi.depotId, IM_ARRAYSIZE(s_steamUi.depotId), "%u", ctx.depotId);
 			snprintf(s_steamUi.manifestId, IM_ARRAYSIZE(s_steamUi.manifestId), "%llu",
 				static_cast<unsigned long long>(ctx.manifestId));
-			SteamStatus(std::format("Pinned depot {} manifest {} ({} rpaks)", ctx.depotId, ctx.manifestId, rpakCount));
+			SteamStatus(std::format("Pinned depot {} manifest {} ({} supported files)", ctx.depotId, ctx.manifestId, rpakCount));
 			s_steamUi.busy = false;
 		}).detach();
+}
+
+struct FileTreeNode_t
+{
+	std::map<std::string, FileTreeNode_t> dirs;
+	std::vector<std::pair<std::string, size_t>> files; // name, index into rpakFiles/selected
+};
+
+// Caller must hold listMutex. forceOpen expands every directory (used while filtering).
+static void DrawFileTree(const FileTreeNode_t& node, bool forceOpen)
+{
+	for (const auto& [name, child] : node.dirs)
+	{
+		if (forceOpen)
+			ImGui::SetNextItemOpen(true, ImGuiCond_Always);
+
+		if (ImGui::TreeNodeEx(name.c_str(), ImGuiTreeNodeFlags_SpanAvailWidth))
+		{
+			DrawFileTree(child, forceOpen);
+			ImGui::TreePop();
+		}
+	}
+
+	for (const auto& [name, index] : node.files)
+	{
+		bool selected = s_steamUi.selected[index];
+		ImGui::PushID(static_cast<int>(index));
+		if (ImGui::Checkbox(name.c_str(), &selected))
+			s_steamUi.selected[index] = selected;
+		ImGui::PopID();
+	}
 }
 
 static void DrawStageManifestFiles(bool busy)
@@ -796,7 +828,7 @@ static void DrawStageManifestFiles(bool busy)
 	if (ImGui::Button("Load manifest"))
 		PinManifestAsync();
 
-	ImGui::SeparatorText("RPak files");
+	ImGui::SeparatorText("Files");
 	ImGui::InputText("Filter", s_steamUi.filter, IM_ARRAYSIZE(s_steamUi.filter));
 
 	if (ImGui::BeginChild("rpak_list", ImVec2(0, -70), ImGuiChildFlags_Borders))
@@ -806,18 +838,32 @@ static void DrawStageManifestFiles(bool busy)
 			s_steamUi.selected.assign(s_steamUi.rpakFiles.size(), false);
 
 		if (s_steamUi.rpakFiles.empty())
-			ImGui::TextDisabled("Load a manifest to list rpak files.");
+			ImGui::TextDisabled("Load a manifest to list files.");
 
+		FileTreeNode_t root;
 		for (size_t i = 0; i < s_steamUi.rpakFiles.size(); ++i)
 		{
 			const auto& file = s_steamUi.rpakFiles[i];
 			if (s_steamUi.filter[0] != '\0' && file.depotPath.find(s_steamUi.filter) == std::string::npos)
 				continue;
 
-			bool selected = s_steamUi.selected[i];
-			if (ImGui::Checkbox(file.depotPath.c_str(), &selected))
-				s_steamUi.selected[i] = selected;
+			FileTreeNode_t* node = &root;
+			size_t start = 0;
+			while (true)
+			{
+				const size_t sep = file.depotPath.find_first_of("/\\", start);
+				if (sep == std::string::npos)
+				{
+					node->files.emplace_back(file.depotPath.substr(start), i);
+					break;
+				}
+				if (sep > start)
+					node = &node->dirs[file.depotPath.substr(start, sep - start)];
+				start = sep + 1;
+			}
 		}
+
+		DrawFileTree(root, s_steamUi.filter[0] != '\0');
 	}
 	ImGui::EndChild();
 

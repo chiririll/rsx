@@ -540,7 +540,7 @@ bool CDXParentHandler::SetupSwapchain()
     UINT deviceFlags = 0;
 
 #ifdef _DEBUG
-    deviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
+    // deviceFlags |= D3D11_CREATE_DEVICE_DEBUG;
 #endif
 
     assertm(m_pMonitors, "had no monitors");

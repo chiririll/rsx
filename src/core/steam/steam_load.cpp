@@ -16,12 +16,36 @@ static std::string PakStemNoPatch(const std::string& depotPath)
 	return stem;
 }
 
+static bool EndsWithNoCase(const std::string& s, const char* suffix)
+{
+	const size_t n = strlen(suffix);
+	return s.size() >= n && _strnicmp(s.c_str() + s.size() - n, suffix, n) == 0;
+}
+
+bool SteamIsSupportedDepotFile(const std::string& depotPath)
+{
+	return EndsWithNoCase(depotPath, ".rpak") || EndsWithNoCase(depotPath, ".mbnk")
+		|| EndsWithNoCase(depotPath, ".mdl") || EndsWithNoCase(depotPath, ".bpk")
+		|| EndsWithNoCase(depotPath, "_dir.vpk");
+}
+
 bool SteamDownloadRpaksForLoad(
-	const std::vector<std::string>& depotRpakPaths,
+	const std::vector<std::string>& depotSelectedPaths,
 	std::vector<std::string>& outLocalPaths,
 	std::string& outError,
 	std::atomic<uint32_t>* progressCounter)
 {
+	// Rpaks get patch-chain handling; everything else is downloaded as-is.
+	std::vector<std::string> depotRpakPaths;
+	std::vector<std::string> otherPaths;
+	for (const std::string& path : depotSelectedPaths)
+	{
+		if (EndsWithNoCase(path, ".rpak"))
+			depotRpakPaths.push_back(path);
+		else
+			otherPaths.push_back(path);
+	}
+
 	if (!g_steamClient.HasDepotContext())
 	{
 		outError = "No Steam depot context is configured";
@@ -39,11 +63,34 @@ bool SteamDownloadRpaksForLoad(
 	for (const std::string& path : depotRpakPaths)
 		toDownload.insert(CSteamClient::NormalizeDepotPath(path));
 
-	// Always try to pull patch_master.rpak if present.
-	for (const auto& file : allFiles)
+	// Try to pull patch_master.rpak if present (only matters when loading rpaks).
+	if (!depotRpakPaths.empty())
 	{
-		if (file.depotPath.ends_with("patch_master.rpak"))
-			toDownload.insert(file.depotPath);
+		for (const auto& file : allFiles)
+		{
+			if (file.depotPath.ends_with("patch_master.rpak"))
+				toDownload.insert(file.depotPath);
+		}
+	}
+
+	std::vector<std::string> otherNormalized;
+	for (const std::string& path : otherPaths)
+	{
+		const std::string norm = CSteamClient::NormalizeDepotPath(path);
+		toDownload.insert(norm);
+		otherNormalized.push_back(norm);
+
+		// A *_dir.vpk is useless without its numbered archives (*_000.vpk, ...).
+		if (EndsWithNoCase(norm, "_dir.vpk"))
+		{
+			const std::string prefix = norm.substr(0, norm.size() - strlen("dir.vpk"));
+			for (const auto& file : allFiles)
+			{
+				if (EndsWithNoCase(file.depotPath, ".vpk") && file.depotPath.size() > prefix.size()
+					&& _strnicmp(file.depotPath.c_str(), prefix.c_str(), prefix.size()) == 0)
+					toDownload.insert(file.depotPath);
+			}
+		}
 	}
 
 	// For each requested pak, pull the full patch chain from the manifest:
@@ -134,7 +181,7 @@ bool SteamDownloadRpaksForLoad(
 		std::filesystem::path anyMatch;
 		for (const std::string& depotPath : toDownload)
 		{
-			if (depotPath.ends_with("patch_master.rpak"))
+			if (depotPath.ends_with("patch_master.rpak") || !EndsWithNoCase(depotPath, ".rpak"))
 				continue;
 
 			const std::string gotStem = PakStemNoPatch(depotPath);
@@ -157,9 +204,12 @@ bool SteamDownloadRpaksForLoad(
 			outLocalPaths.emplace_back(chosen.string());
 	}
 
+	for (const std::string& norm : otherNormalized)
+		outLocalPaths.emplace_back(std::filesystem::absolute(root / std::filesystem::path(norm)).string());
+
 	if (outLocalPaths.empty())
 	{
-		outError = "No rpak files were downloaded";
+		outError = "No files were downloaded";
 		return false;
 	}
 
